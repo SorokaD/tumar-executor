@@ -25,7 +25,8 @@ python scripts/apply_pg_migrations.py
 | `004_align_legacy_schema.sql` | Патч старых таблиц (если создавали вручную до 001) |
 | `005_add_execution_metrics.sql` | trade_results: fees, execution metrics, close_source |
 | `006_trade_daily_summary_view.sql` | VIEW `v_trade_daily_summary` |
-| `diagnose_okx_exec_schema.sql` | Проверка колонок |
+| `006_trade_daily_summary_view.sql` | VIEW `v_trade_daily_summary` |
+| `007_russian_column_comments.sql` | Русские COMMENT ON для таблиц/колонок |
 
 ## Документация
 

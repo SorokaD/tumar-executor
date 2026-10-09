@@ -15,6 +15,8 @@ _FILES = (
     _ROOT / "migrations/postgres/003_triggers.sql",
     _ROOT / "migrations/postgres/005_add_execution_metrics.sql",
     _ROOT / "migrations/postgres/006_trade_daily_summary_view.sql",
+    _ROOT / "migrations/postgres/007_russian_column_comments.sql",
+    _ROOT / "migrations/postgres/008_russian_comments_core_three.sql",
 )
 
 

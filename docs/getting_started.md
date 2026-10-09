@@ -82,12 +82,14 @@ OKX_API_KEY=...
 OKX_API_SECRET=...
 OKX_API_PASSPHRASE=...
 OKX_BASE_URL=https://www.okx.com
-OKX_INST_ID=BTC-USDT-SWAP
 OKX_SQLITE_PATH=data/baseline_mvp.sqlite3
 OKX_LOOP_SLEEP_SEC=1
+OKX_HFT_POSTGRES_ENABLED=0
 ```
 
-Остальное — из `.env.example` (размер контракта, `OKX_TD_MODE`, maker reprice и т.д.).
+Параметры стратегии (инструмент, размер, TP/SL) — в **`config/strategies.yaml`**, не в `.env`.
+
+Остальное — из `.env.example` (Postgres, control-api token и т.д.).
 
 ## 3. Команды запуска
 
@@ -128,9 +130,10 @@ Start-Process python -ArgumentList "-m","app.main","--run-seconds","259200" -Wor
 
 ## 4. Как убедиться, что всё работает
 
-1. **Логи (stdout):** уровень задаётся `OKX_HFT_LOG_LEVEL`. Для baseline ожидаются сообщения вроде `starting baseline executor`, решения стратегии, при demo — `entry maker order submitted`, `position opened`, затем выход по TP/SL/timeout.
-2. **SQLite:** файл по пути `OKX_SQLITE_PATH`. Таблицы: `signals`, `orders`, `positions`, `trade_results`, `service_events`. События вроде `position_reconciled` или `executor unhealthy` помогают при разборе инцидентов.
-3. **Быстрая проверка API:** `python -m app.main --check-okx` — account, ticker, tick size.
+1. **Логи (stdout):** `starting baseline executor`, `postgres journal enabled`, `run_id=…`, решения стратегии, `position closed` с net PnL.
+2. **SQLite:** `OKX_SQLITE_PATH` — см. [database/sqlite_mvp.md](database/sqlite_mvp.md).
+3. **PostgreSQL** (если `OKX_HFT_POSTGRES_ENABLED=1`): `okx_exec.trade_results`, view `v_trade_daily_summary` — см. [baseline_measurement.md](baseline_measurement.md).
+4. **Быстрая проверка API:** `python -m app.main --check-okx`.
 
 ## 5. Частые проблемы
 
@@ -150,7 +153,8 @@ Start-Process python -ArgumentList "-m","app.main","--run-seconds","259200" -Wor
 
 ## 7. Куда идти дальше
 
-- Поведение baseline (стратегия, maker post-only, TP/SL/timeout): [baseline_demo_mvp.md](baseline_demo_mvp.md).
+- Поведение baseline: [baseline_demo_mvp.md](baseline_demo_mvp.md).
+- Measurement & analytics: [baseline_measurement.md](baseline_measurement.md).
 - Стратегия подробно: [strategies/random_execution_baseline.md](strategies/random_execution_baseline.md).
 - Режимы `live` / `paper` / `replay`: [runtime_modes.md](runtime_modes.md).
 - Идея сверки с биржей: [reconciliation.md](reconciliation.md).

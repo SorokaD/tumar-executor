@@ -1,18 +1,21 @@
 # Baseline Demo MVP
 
-Документ описывает рабочий MVP: случайная baseline-стратегия на **REST polling** выставляет maker **post-only** заявки на вход и выход, сопровождает позицию по TP/SL/timeout и пишет журнал в SQLite.
+Документ описывает рабочий MVP: случайная baseline-стратегия на **REST polling** выставляет maker **post-only** заявки на вход и выход, сопровождает позицию по TP/SL/timeout и пишет журнал в SQLite + PostgreSQL.
 
-Первый запуск с нуля: **[getting_started.md](getting_started.md)**.
+Первый запуск с нуля: **[getting_started.md](getting_started.md)**.  
+Measurement baseline (net PnL, fees, analytics): **[baseline_measurement.md](baseline_measurement.md)**.
 
 ## Что уже работает
 
 - baseline decision раз в 30 секунд (`strategy/random_baseline`);
-- вход и выход через **post-only** лимитки (maker), перестановка по таймерам `OKX_MAKER_REPRICE_SEC` / `OKX_MAKER_MAX_WAIT_SEC`;
+- конфиг стратегий в **`config/strategies.yaml`** (не в `.env`);
+- вход и выход через **post-only** лимитки (maker), перестановка по `maker_reprice_sec` / `maker_max_wait_sec`;
 - локальный мониторинг TP/SL/timeout по последней цене тикера;
 - cooldown после закрытия;
-- при расхождении памяти и биржи: восстановление открытой позиции из snapshot `GET /account/positions` (событие `position_reconciled` в `service_events`);
-- обработка части ошибок reduce-only при сверке (`exit_sync_lost`, закрытие с `sync_lost` при пустой позиции на бирже — см. код оркестратора);
-- сохранение сигналов, ордеров, позиций, PnL и service events в SQLite.
+- market fallback на выходе после N неудачных maker exit;
+- при расхождении памяти и биржи: восстановление позиции (`position_reconciled`);
+- **dual-write**: SQLite (ops) + PostgreSQL `okx_exec` (аналитика, async);
+- `trade_results` с **gross/net PnL**, комиссиями, execution metrics, `exit_reason`, `close_source`.
 
 ## Быстрый запуск
 
@@ -26,21 +29,27 @@ python -m app.main
 
 ## Ключевые переменные окружения
 
-Имена и значения по умолчанию — в `config/settings.py` и [.env.example](../.env.example). Кратко:
+Инфраструктура — в `.env` ([.env.example](../.env.example)). **Параметры стратегии** — в `config/strategies.yaml` (`OKX_HFT_STRATEGIES_CONFIG`).
 
 | Переменная | Смысл |
 |------------|--------|
-| `OKX_HFT_RUNTIME_MODE` | `live` / `paper` / `replay` — влияет на выбор клиента в `bootstrap` |
-| `OKX_HFT_SAFE_MODE` | `1` — **всегда** stub, без сетевых ордеров |
-| `OKX_ENABLE_REAL_OKX_IN_PAPER` | при `paper` и `0` — stub; при `paper` и `1` — реальный REST (если не мешает safe_mode) |
-| `OKX_FLAG_DEMO` | заголовок demo для OKX API |
-| `OKX_INST_ID` | например `BTC-USDT-SWAP` |
-| `OKX_TD_MODE` | `cross` / `isolated` — как в кабинете OKX |
-| `OKX_ORD_TYPE` | в MVP используется post-only maker-путь (`post_only`) |
-| `OKX_ORDER_SIZE` | размер в контрактах (строка) |
-| `OKX_LOOP_SLEEP_SEC` | пауза между итерациями главного цикла |
-| `OKX_SQLITE_PATH` | путь к SQLite (по умолчанию `data/baseline_mvp.sqlite3`) |
-| `OKX_HTTP_TIMEOUT_SEC` | таймаут HTTP к OKX |
+| `OKX_HFT_RUNTIME_MODE` | `live` / `paper` / `replay` |
+| `OKX_HFT_SAFE_MODE` | `1` — stub, без ордеров на биржу |
+| `OKX_FLAG_DEMO` | demo API OKX |
+| `OKX_SQLITE_PATH` | SQLite ops-журнал |
+| `OKX_HFT_POSTGRES_ENABLED` | `1` — запись в PostgreSQL |
+| `POSTGRES_LINK`, `POSTGRES_PORT`, … | подключение к `okx_exec` |
+| `OKX_LOOP_SLEEP_SEC` | пауза главного цикла |
+
+Стратегия (`config/strategies.yaml`):
+
+| Параметр | Смысл |
+|----------|--------|
+| `inst_id`, `order_size`, `td_mode` | инструмент и размер |
+| `decision_step_sec`, `cooldown_sec` | тайминг решений |
+| `take_profit_ticks`, `stop_loss_ticks`, `timeout_sec` | выход |
+| `exit_maker_max_attempts`, `exit_market_fallback_enabled` | maker exit + fallback |
+| `fee_rate_maker`, `fee_rate_taker` | оценка комиссий, если нет OKX fills |
 
 ## Как понять, что система торгует
 
@@ -50,13 +59,14 @@ python -m app.main
 - `strategy decided LONG/SHORT`
 - `entry maker order submitted` / `entry order submitted` (формулировки в логах см. `app/orchestrator.py`)
 - `position opened` (после fill входа)
-- `tp` / `sl` / `timeout` и выход maker
-- `position closed`
+- `tp` / `sl` / `timeout` и выход maker (или market fallback)
+- `position closed` с `gross_pnl`, `net_pnl`, `exit_reason`, `close_source`
 
-В SQLite (`OKX_SQLITE_PATH`):
+В SQLite / PostgreSQL:
 
 - таблицы `signals`, `orders`, `positions`, `trade_results`, `service_events`;
-- при восстановлении позиции после рестарта/рассинхрона: `position_reconciled`.
+- в `trade_results`: `net_pnl`, `fee_source`, execution metrics;
+- при reconcile: `position_reconciled`, `exit_reason=reconcile`.
 
 ## Smoke-run (авто-остановка)
 
@@ -120,7 +130,15 @@ python -m app.main --max-loops 60
 
 ## Ограничения MVP
 
-- только REST polling (без private/public WebSocket в этом контуре);
-- один инструмент (`OKX_INST_ID`);
-- комиссии в `trade_results`: `entry_fee`, `exit_fee`, `fees_total`, `net_pnl`; источник в `fee_source` (`okx_fill` / `estimated_config`);
-- нет отдельного HTTP control plane в обязательном пути запуска (см. optional extra `control` в `pyproject.toml`).
+- только REST polling (без private WebSocket в этом контуре);
+- одна включённая стратегия на инструмент в net mode (см. strategy manager);
+- funding в `trade_results` пока не учитывается;
+- нет отдельного HTTP control plane в обязательном пути запуска (optional `control` в `pyproject.toml`).
+
+## Аналитика после сбора данных
+
+```bash
+python scripts/trade_daily_summary.py --strategy random_baseline_v1
+```
+
+См. [baseline_measurement.md](baseline_measurement.md).

@@ -4,7 +4,8 @@
 
 Практический запуск процесса и журналирование в SQLite: [getting_started.md](getting_started.md).
 
-Полная модель данных (SQLite + PostgreSQL): [database/data_flow.md](database/data_flow.md).
+Полная модель данных (SQLite + PostgreSQL): [database/data_flow.md](database/data_flow.md).  
+Measurement baseline: [baseline_measurement.md](baseline_measurement.md).
 
 ## Цепочка: signal → … → reconciliation
 
@@ -51,7 +52,7 @@ flowchart LR
 
 ### 8. PnL
 
-`accounting`: реализованный/нереализованный результат, комиссии, funding (когда подключатся), оценка slippage относительно эталонной цены.
+`accounting` (`pnl_engine`, `fee_engine`) + `execution/trade_finalize.py`: gross/net PnL, комиссии (`okx_fill` или `estimated_config`), запись в `trade_results`. Funding — в roadmap.
 
 ### 9. Persistence
 

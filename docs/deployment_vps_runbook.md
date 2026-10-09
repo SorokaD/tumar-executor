@@ -208,10 +208,26 @@ curl -H "X-API-Key: <token>" http://<VPS_IP>:8080/strategies
 режим=live
 exchange.okx.rest_client
 runtime_mode=live safe_mode=False
+postgres journal enabled schema=okx_exec
+postgres executor_run started run_id=...
 strategy manager started
 ```
 
 Оба контейнера в `docker compose ps`: **Up (healthy)**.
+
+### PostgreSQL (после обновления кода с measurement)
+
+```bash
+sudo docker compose exec executor python scripts/apply_pg_migrations.py
+```
+
+Миграции `005` (колонки `trade_results`) и `006` (view daily summary). Подробнее: [baseline_measurement.md](baseline_measurement.md).
+
+### Дневная аналитика
+
+```bash
+sudo docker compose exec executor python scripts/trade_daily_summary.py --strategy random_baseline_v1
+```
 
 ---
 
@@ -238,6 +254,7 @@ sudo ufw status numbered
 cd /opt/okx-hft-executor/okx-hft-executor
 git pull
 sudo docker compose up -d --build
+sudo docker compose exec executor python scripts/apply_pg_migrations.py
 ```
 
 **Автодеплой при push в `main`:** [deployment_cicd.md](deployment_cicd.md).
@@ -272,7 +289,7 @@ sudo docker compose up -d
 | [deployment_hybrid.md](deployment_hybrid.md) | hybrid-модель, control-api, стратегии |
 | [SECURITY_BASELINE_VPS_SSH_AND_NETWORK.md](SECURITY_BASELINE_VPS_SSH_AND_NETWORK.md) | SSH, UFW, Fail2Ban |
 | [control_api.md](control_api.md) | HTTP API |
-| [runtime_modes.md](runtime_modes.md) | live / paper / replay |
+| [baseline_measurement.md](baseline_measurement.md) | net PnL, fees, daily summary |
 
 ---
 

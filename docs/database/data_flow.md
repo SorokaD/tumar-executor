@@ -19,30 +19,32 @@ sequenceDiagram
     O->>X: place_limit_post_only
     X-->>O: live → filled
     O->>DB: orders (status=filled)
-    O->>DB: order_fills (planned)
+    O->>DB: order_fills (synthetic on fill; OKX fee fetch at close)
     O->>DB: positions (open)
     Note over O: мониторинг TP/SL/timeout
     O->>DB: execution_attempts (submit_order exit)
     O->>DB: orders (exit, reduce_only)
     X-->>O: exit filled
     O->>DB: positions (closed)
-    O->>DB: trade_results
+    O->>DB: trade_results (gross/net PnL, fees, execution metrics)
 ```
 
-## Что пишется в SQLite сегодня
+## Что пишется в SQLite и PostgreSQL
 
-| Событие в orchestrator | SQLite таблица | PG (план) |
-|------------------------|----------------|-----------|
+| Событие в orchestrator | SQLite | PostgreSQL `okx_exec` |
+|------------------------|--------|------------------------|
 | `make_decision()` | signals | strategy_signals |
 | `entry maker order submitted` | orders + service_events | orders + execution_attempts |
 | `entry order not filled` (canceled) | orders + service_events | orders + execution_attempts |
 | `position opened` | positions + service_events | positions |
 | reprice | orders (REPLACE ⚠️) | **новый** orders + cancel attempt |
 | `timeout/tp/sl exit submitted` | orders + service_events | orders + execution_attempts |
-| `position closed` | positions, trade_results | positions, trade_results, order_fills |
+| `position closed` | positions, trade_results (net PnL, fees, metrics) | positions, trade_results, order_fills |
 | `startup reconcile` | service_events | reconciliation_events + positions |
 | `50102` / loop error | service_events | execution_attempts + service_events |
-| strategy enable/disable | strategies_registry, commands | то же в PG (опционально) |
+| strategy enable/disable | strategies_registry, commands | strategies_registry, commands (опционально) |
+
+При закрытии позиции `TradeLifecycleTracker` (`execution/trade_lifecycle.py`) агрегирует reprice/cancel/wait и передаётся в `trade_results` через `execution/trade_finalize.py`.
 
 ## Сценарий: ордер не исполнился (частый)
 
@@ -74,7 +76,7 @@ sequenceDiagram
 
 Strategy manager запускает **отдельный asyncio task** на стратегию:
 
-- у каждой свой `run_id` (рекомендуется при реализации PostgresStore)
+- у каждой свой `run_id` (через `ExecutorStore` / `executor_runs`)
 - общий `inst_id` возможен, но позиция **одна на инструмент** в one-way mode — не запускать две стратегии на один `inst_id` без hedge-логики
 
 Фильтр аналитики: всегда `strategy_name` + период `ts_*`.

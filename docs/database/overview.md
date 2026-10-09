@@ -18,7 +18,7 @@ flowchart TB
   OR --> SQ
   SM --> SQ
   CA --> SQ
-  OR -.->|планируется| PG
+  OR -.->|dual-write| PG
 ```
 
 | | SQLite | PostgreSQL `okx_exec` |
@@ -26,10 +26,12 @@ flowchart TB
 | **Где** | Файл `data/baseline_mvp.sqlite3` (Docker: `/app/data/`) | Сервер TimescaleDB (отдельный хост) |
 | **Зачем** | Быстрый ops-журнал, очередь команд control-api, smoke-run | Полная аналитика, сравнение стратегий, аудит |
 | **Объём** | Малый, один файл на VPS | Растёт со временем, hypertables |
-| **Кто пишет** | `SqliteMvpStore` в `persistence/sqlite_store.py` | `PostgresStore` — **в разработке** |
-| **Кто читает** | control-api, ручная диагностика на VPS | Superset/Grafana/ноутбуки, отчёты |
+| **Кто пишет** | `ExecutorStore` → `SqliteMvpStore` | `ExecutorStore` → `PostgresJournal` (фоновая очередь) |
+| **Кто читает** | control-api, ручная диагностика на VPS | SQL, `trade_daily_summary.py`, Superset/Grafana |
 
-SQLite **не заменяется** сразу: на VPS control-api и strategy manager завязаны на локальный файл. PostgreSQL — **источник правды для аналитики**, когда dual-write будет подключён.
+SQLite **не заменяется**: control-api и strategy manager завязаны на локальный файл. PostgreSQL — **источник правды для аналитики** (dual-write из `ExecutorStore`).
+
+Подробнее про measurement baseline: [baseline_measurement.md](../baseline_measurement.md).
 
 ## Схема PostgreSQL
 
@@ -80,7 +82,8 @@ Executor генерирует строковые id с префиксом (`serv
 | Переменная | Назначение |
 |------------|------------|
 | `OKX_SQLITE_PATH` | Путь к SQLite (см. `.env.example`) |
-| `DATABASE_URL` | PostgreSQL connection string (для миграций и будущего `PostgresStore`) |
+| `DATABASE_URL` / `POSTGRES_*` | PostgreSQL (journal, миграции) |
+| `OKX_HFT_POSTGRES_ENABLED` | `1` — включить запись в PG |
 
 Пример `DATABASE_URL`:
 
@@ -92,8 +95,9 @@ postgresql://executor_rw:PASSWORD@HOST:5432/okx_hft
 
 ## Дорожная карта persistence
 
-1. ✅ DDL `migrations/postgres/*`
-2. ⬜ `PostgresStore` + dual-write из orchestrator
-3. ⬜ Запись `order_fills` из OKX REST/WS
-4. ⬜ Fees/funding в `trade_results`
-5. ⬜ Materialized views / дашборды
+1. ✅ DDL `migrations/postgres/*` (включая `005`, `006`)
+2. ✅ Dual-write из orchestrator (`ExecutorStore` + `PostgresJournal`)
+3. ⬜ Полные `order_fills` из OKX WS / детальный fee на каждый partial fill
+4. ✅ Fees и net PnL в `trade_results` (`fee_engine`, `trade_finalize`)
+5. ✅ View `v_trade_daily_summary` + CLI `scripts/trade_daily_summary.py`
+6. ⬜ Materialized views / дашборды Grafana

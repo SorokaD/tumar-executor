@@ -28,6 +28,15 @@
 - детальная формула PnL (делегировать `accounting`);
 - низкоуровневый парсинг JSON OKX (делегировать `exchange`).
 
+## Baseline (реализовано в `app/orchestrator.py`)
+
+| Модуль | Роль |
+|--------|------|
+| `trade_lifecycle.py` | In-memory метрики одной сделки (reprice, wait, signal_id) |
+| `trade_finalize.py` | Сборка `trade_results`: fees, net PnL, exit_reason, close_source |
+
+См. [docs/baseline_measurement.md](../docs/baseline_measurement.md).
+
 ## Основные сущности / модули
 
 См. модули пакета; граница с `exchange` — через порт `ExchangeClient`.

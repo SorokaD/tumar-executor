@@ -183,7 +183,7 @@ erDiagram
 | ts_fill | TIMESTAMPTZ | |
 | raw_fill_json | JSONB | |
 
-*Запись из кода — следующий этап разработки.*
+При fill ордера пишется синтетическая строка; детальные OKX fees также подтягиваются в `trade_results` при закрытии (`get_order_fills`).
 
 ---
 
@@ -205,7 +205,7 @@ erDiagram
 | max_favorable_price, max_adverse_price | NUMERIC | для MFE/MAE |
 | mfe_ticks, mae_ticks | NUMERIC | |
 | entry_ts, exit_ts | TIMESTAMPTZ | |
-| exit_reason | TEXT | tp / sl / timeout / maker_exit / sync_lost |
+| exit_reason | TEXT | tp / sl / timeout / reconcile / … |
 | updated_at | TIMESTAMPTZ | триггер `set_updated_at` |
 
 ---
@@ -231,8 +231,23 @@ erDiagram
 | win_flag | BOOL | net_pnl > 0 |
 | extra_json | JSONB | полный снимок execution metrics |
 
-**gross_pnl vs net_pnl:** gross — разница цен × size без комиссий; net — после `fees_total`.
 Дневной summary: view `okx_exec.v_trade_daily_summary` или `python scripts/trade_daily_summary.py`.
+
+### View `v_trade_daily_summary`
+
+Агрегация по `trade_day`, `strategy_name`, `run_id`, `inst_id`:
+
+| Метрика | Описание |
+|---------|----------|
+| `trades_count` | число сделок |
+| `winrate_gross`, `winrate_net` | доля прибыльных |
+| `gross_pnl_sum`, `net_pnl_sum`, `total_fee_sum` | суммы |
+| `market_fallback_ratio` | доля выходов через market fallback |
+| `maker_entry_ratio`, `maker_exit_ratio` | доля maker fills |
+| `avg_entry_reprice_count`, `avg_exit_reprice_count` | качество исполнения |
+| `tp_count`, `sl_count`, `timeout_count` | структура выходов |
+
+DDL: `migrations/postgres/006_trade_daily_summary_view.sql`.
 
 ---
 

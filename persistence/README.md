@@ -40,13 +40,18 @@
 - **accounting** может читать историю исполнений.
 - **observability** — метрики ошибок БД.
 
+| `sqlite_store.py` | SQLite ops-журнал |
+| `executor_store.py` | Фасад dual-write (SQLite + `PostgresJournal`) |
+| `postgres_journal.py` | Асинхронная очередь записи в `okx_exec` |
+
 ## Документация по СУБД
 
 Полное описание SQLite MVP и PostgreSQL `okx_exec`: **[docs/database/README.md](../docs/database/README.md)**.
 
-- Текущий код пишет в **SQLite** (`sqlite_store.py`).
-- DDL для **PostgreSQL/TimescaleDB**: `migrations/postgres/`.
-- Dual-write в PG — следующий этап.
+- **SQLite** — ops, control-api (`sqlite_store.py`).
+- **PostgreSQL** — аналитика (`postgres_journal.py` через `ExecutorStore`).
+- DDL: `migrations/postgres/` (`005`, `006` — measurement baseline).
+- См. [docs/baseline_measurement.md](../docs/baseline_measurement.md).
 
 ## Примеры будущего расширения
 

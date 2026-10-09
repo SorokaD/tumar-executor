@@ -10,7 +10,7 @@
 - запускает стратегии параллельно (сейчас торговая логика baseline);
 - исполняет заявки через OKX REST или stub (по режиму);
 - сопровождает позицию (TP/SL/timeout, maker reprice, reconciliation);
-- сохраняет сигналы, ордера, позиции, PnL и service events в БД (SQLite сейчас; PostgreSQL `okx_exec` — DDL готов);
+- сохраняет сигналы, ордера, позиции, **gross/net PnL**, комиссии и execution metrics в SQLite + PostgreSQL `okx_exec`;
 - принимает команды включения/выключения стратегий через очередь команд.
 
 ## Ключевые подсистемы
@@ -20,8 +20,11 @@
 - `app/orchestrator.py` — baseline-оркестрация `signal -> order -> position -> exit`.
 - `strategy/contracts.py` — единый контракт стратегии (plugin API).
 - `strategy/registry.py` — реестр `strategy_name -> factory`.
-- `exchange/okx/rest_client.py` — интеграция с OKX v5 REST.
-- `persistence/sqlite_store.py` — схема и операции хранения runtime-данных.
+- `exchange/okx/rest_client.py` — интеграция с OKX v5 REST (+ `get_order_fills` для комиссий).
+- `persistence/executor_store.py` — dual-write SQLite + PostgresJournal.
+- `persistence/sqlite_store.py` — локальный ops-журнал.
+- `execution/trade_lifecycle.py`, `execution/trade_finalize.py` — measurement baseline.
+- `accounting/fee_engine.py`, `accounting/pnl_engine.py` — gross/net PnL и комиссии.
 - `control/app.py` — удаленный Control API для управления без SSH.
 
 ## Модель масштабирования
@@ -44,16 +47,16 @@
 | Слой | Где | Документация |
 |------|-----|--------------|
 | Операционный журнал | SQLite `OKX_SQLITE_PATH` | [database/sqlite_mvp.md](database/sqlite_mvp.md) |
-| Аналитика / DWH | PostgreSQL схема `okx_exec` | [database/README.md](database/README.md) |
+| Аналитика / DWH | PostgreSQL `okx_exec` | [database/README.md](database/README.md), [baseline_measurement.md](baseline_measurement.md) |
 
-DDL: `migrations/postgres/`. Запись в PostgreSQL из кода — следующий этап (dual-write).
+DDL: `migrations/postgres/` (включая `005`, `006`). Dual-write: `ExecutorStore`.
 
 ## Как добавить новую стратегию
 
 1. Создать модуль стратегии в `strategy/<name>/service.py`.
 2. Реализовать контракт из `strategy/contracts.py`.
 3. Зарегистрировать стратегию в `strategy/registry.py`.
-4. Добавить ее в `OKX_HFT_STRATEGIES_JSON`.
+4. Добавить блок в `config/strategies.yaml` и зарегистрировать в `strategy/registry.py`.
 
 После этого strategy manager и control-api изменений не требуют.
 

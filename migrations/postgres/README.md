@@ -7,6 +7,8 @@
 ```bash
 export DATABASE_URL='postgresql://executor_rw:PASSWORD@HOST:5432/okx_hft'
 bash migrations/postgres/apply_all.sh
+# или
+python scripts/apply_pg_migrations.py
 ```
 
 Сброс (dev): `RESET=1 bash migrations/postgres/apply_all.sh`
@@ -21,7 +23,10 @@ bash migrations/postgres/apply_all.sh
 | `002_indexes_only.sql` | без Timescale |
 | `003_triggers.sql` | updated_at на positions |
 | `004_align_legacy_schema.sql` | Патч старых таблиц (если создавали вручную до 001) |
-| `diagnose_okx_exec_schema.sql` | Проверка колонок |
+| `005_add_execution_metrics.sql` | trade_results: fees, execution metrics, close_source |
+| `006_trade_daily_summary_view.sql` | VIEW `v_trade_daily_summary` |
+| `006_trade_daily_summary_view.sql` | VIEW `v_trade_daily_summary` |
+| `007_russian_column_comments.sql` | Русские COMMENT ON для таблиц/колонок |
 
 ## Документация
 

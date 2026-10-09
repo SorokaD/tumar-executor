@@ -4,12 +4,21 @@
 
 Полная инструкция также в [migrations/postgres/README.md](../../migrations/postgres/README.md).
 
-### Linux / VPS
+### Без Python / из контейнера VPS
+
+```bash
+sudo docker compose exec executor python scripts/apply_pg_migrations.py
+```
+
+### Linux / VPS (apply_all.sh)
 
 ```bash
 export DATABASE_URL='postgresql://executor_rw:PASSWORD@HOST:5432/okx_hft'
 cd /path/to/okx-hft-executor
 bash migrations/postgres/apply_all.sh
+# затем вручную 005 и 006, если apply_all.sh ещё не обновлён:
+psql "$DATABASE_URL" -f migrations/postgres/005_add_execution_metrics.sql
+psql "$DATABASE_URL" -f migrations/postgres/006_trade_daily_summary_view.sql
 ```
 
 Полный сброс схемы (удаляет данные `okx_exec`):
@@ -75,7 +84,7 @@ cp data/baseline_mvp.sqlite3 data/baseline_mvp.sqlite3.bak.$(date +%Y%m%d)
 - `USAGE` на schema `okx_exec`
 - `SELECT, INSERT, UPDATE` на таблицы (без `DROP` в prod)
 
-`DATABASE_URL` для приложения (будущий `PostgresStore`):
+`DATABASE_URL` для приложения (`PostgresJournal` / миграции):
 
 ```text
 postgresql://executor_rw:SECRET@167.86.110.201:5432/okx_hft
@@ -88,6 +97,8 @@ postgresql://executor_rw:SECRET@167.86.110.201:5432/okx_hft
 | Версия | Файлы | Примечание |
 |--------|-------|------------|
 | v1 | 001, 002, 003 | начальная схема okx_exec |
+| v2 | 005, 006 | trade_results metrics + daily summary view |
+| patch | 004 | выравнивание legacy-таблиц |
 
 Новые изменения — **новые файлы** `004_*.sql`, не править 001 задним числом на prod.
 
@@ -154,13 +165,15 @@ pg_restore -d okx_hft -n okx_exec --clean okx_exec_YYYYMMDD.dump
 
 ## Связь с Docker Compose
 
-Сейчас `docker-compose.yml` **не** подключает PostgreSQL — только SQLite volume.
+`docker-compose.yml` монтирует SQLite volume. PostgreSQL подключается через `.env`:
 
-После `PostgresStore`:
-
-```yaml
-environment:
-  DATABASE_URL: ${DATABASE_URL}
+```env
+OKX_HFT_POSTGRES_ENABLED=1
+POSTGRES_LINK=167.86.110.201
+POSTGRES_PORT=6432
+POSTGRES_DB=okx_hft
+POSTGRES_USER=executor_rw
+POSTGRES_PASSWORD=...
 ```
 
-или secrets через `.env`.
+После обновления кода с measurement-логикой — один раз `python scripts/apply_pg_migrations.py` (см. [baseline_measurement.md](../baseline_measurement.md)).

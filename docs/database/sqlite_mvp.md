@@ -2,7 +2,7 @@
 
 Файл: `OKX_SQLITE_PATH` (по умолчанию `data/baseline_mvp.sqlite3`).
 
-Код: `persistence/sqlite_store.py`, вызовы из `app/orchestrator.py`, `app/strategy_manager.py`, `control/app.py`.
+Код: `persistence/sqlite_store.py`, вызовы через `persistence/executor_store.py` из `app/orchestrator.py`, `app/strategy_manager.py`, `control/app.py`.
 
 ## Назначение
 
@@ -10,9 +10,10 @@
 
 - smoke-run и диагностики на VPS;
 - control-api (`strategies_registry`, `strategy_commands`);
-- быстрой проверки «сколько сигналов/ордеров» без PostgreSQL.
+- быстрой проверки «сколько сигналов/ордеров» без PostgreSQL;
+- локальной копии `trade_results` с fees и execution metrics.
 
-**Ограничение:** не подходит для полной аналитики (нет `execution_attempts`, нет истории reprice, `fees=0`).
+**Ограничение:** нет полной истории reprice по ордерам (`INSERT OR REPLACE` на `orders`); для этого — PostgreSQL `okx_exec.orders`.
 
 ## Таблицы
 
@@ -54,18 +55,40 @@
 | entry_ts | TEXT | |
 | exit_ts | TEXT | |
 | size | REAL | |
-| exit_reason | TEXT | tp / sl / timeout / maker_exit / sync_lost / … |
+| exit_reason | TEXT | tp / sl / timeout / reconcile / … |
 
 ### `trade_results`
+
+Итог сделки (одна строка на `position_id`). Колонки добавляются автоматически при старте (`_ensure_column`).
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
 | position_id | TEXT PK | |
 | strategy_name | TEXT | |
-| gross_pnl | REAL | |
-| fees | REAL | сейчас всегда 0 |
-| net_pnl | REAL | |
+| gross_pnl | REAL | до комиссий |
+| fees | REAL | = `fees_total` (entry + exit) |
+| net_pnl | REAL | после комиссий |
 | holding_seconds | REAL | |
+| entry_fee, exit_fee | REAL | |
+| fee_ccy | TEXT | |
+| entry_liquidity, exit_liquidity | TEXT | maker / taker |
+| entry_avg_px, exit_avg_px | REAL | |
+| fee_source | TEXT | `okx_fill` / `estimated_config` / `missing` |
+| fee_status | TEXT | `ok` / `pending` |
+| exit_reason | TEXT | tp / sl / timeout / reconcile |
+| close_source | TEXT | executor_maker / executor_market_fallback / okx_reconcile |
+| signal_id | TEXT | исходный entry signal (через reprice) |
+| inst_id, position_side, size | | снимок сделки |
+| opened_at, closed_at | TEXT ISO | |
+| execution_metrics_json | TEXT | JSON: reprice counts, wait_sec, market_fallback, … |
+
+Пример:
+
+```sql
+SELECT position_id, gross_pnl, net_pnl, fees, fee_source, exit_reason, close_source
+FROM trade_results
+ORDER BY closed_at DESC LIMIT 10;
+```
 
 ### `service_events`
 

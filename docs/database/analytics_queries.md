@@ -99,15 +99,74 @@ ORDER BY 1 DESC;
 ## Распределение exit_reason
 
 ```sql
-SELECT exit_reason, count(*), avg(net_pnl), sum(net_pnl)
+SELECT COALESCE(final_exit_reason, exit_reason) AS reason,
+       count(*), avg(net_pnl), sum(net_pnl)
 FROM okx_exec.trade_results
 WHERE strategy_name = 'random_baseline_v1'
   AND exit_ts >= now() - interval '30 days'
-GROUP BY exit_reason
+GROUP BY 1
 ORDER BY count(*) DESC;
 ```
 
-## Reprice: сколько ордеров на один сигнал
+## close_source и market fallback
+
+```sql
+SELECT close_source,
+       count(*) AS trades,
+       count(*) FILTER (WHERE exit_market_fallback_used) AS market_fallback,
+       avg(net_pnl) AS avg_net_pnl
+FROM okx_exec.trade_results
+WHERE strategy_name = 'random_baseline_v1'
+  AND exit_ts >= now() - interval '7 days'
+GROUP BY close_source;
+```
+
+## Комиссии: okx_fill vs estimated
+
+```sql
+SELECT fee_source,
+       count(*) AS trades,
+       sum(fees_total) AS total_fees,
+       avg(fees_total) AS avg_fee
+FROM okx_exec.trade_results
+WHERE strategy_name = 'random_baseline_v1'
+  AND exit_ts >= now() - interval '30 days'
+GROUP BY fee_source;
+```
+
+## Дневной summary (view)
+
+```sql
+SELECT *
+FROM okx_exec.v_trade_daily_summary
+WHERE strategy_name = 'random_baseline_v1'
+  AND trade_day >= now() - interval '14 days'
+ORDER BY trade_day DESC;
+```
+
+Или CLI: `python scripts/trade_daily_summary.py --strategy random_baseline_v1 --from-day 2026-07-01`
+
+## Maker vs taker (trade_results)
+
+```sql
+SELECT entry_liquidity, exit_liquidity, count(*), sum(fees_total)
+FROM okx_exec.trade_results
+WHERE strategy_name = 'random_baseline_v1'
+  AND exit_ts >= now() - interval '7 days'
+GROUP BY 1, 2;
+```
+
+## Maker vs taker (order_fills, детальнее)
+
+```sql
+SELECT liquidity_side, count(*), sum(fee) AS total_fees
+FROM okx_exec.order_fills
+WHERE strategy_name = 'random_baseline_v1'
+  AND ts_fill >= now() - interval '7 days'
+GROUP BY liquidity_side;
+```
+
+## Reprice: сколько ордеров на один signal_id
 
 ```sql
 SELECT signal_id, count(*) AS order_rows,
@@ -121,6 +180,20 @@ GROUP BY signal_id
 HAVING count(*) > 1
 ORDER BY order_rows DESC
 LIMIT 20;
+```
+
+## Среднее качество исполнения (trade_results)
+
+```sql
+SELECT
+    avg(entry_reprice_count) AS avg_entry_reprice,
+    avg(exit_reprice_count) AS avg_exit_reprice,
+    avg(entry_wait_sec) AS avg_entry_wait,
+    avg(exit_wait_sec) AS avg_exit_wait,
+    avg(CASE WHEN exit_market_fallback_used THEN 1.0 ELSE 0.0 END) AS market_fallback_ratio
+FROM okx_exec.trade_results
+WHERE strategy_name = 'random_baseline_v1'
+  AND exit_ts >= now() - interval '7 days';
 ```
 
 ## Сравнение двух стратегий (baseline vs model)
@@ -158,7 +231,7 @@ WHERE ts_event >= now() - interval '1 day'
 GROUP BY 1, 2;
 ```
 
-## Maker vs taker (когда появятся fills)
+## Maker vs taker (order_fills)
 
 ```sql
 SELECT liquidity_side, count(*), sum(fee) AS total_fees
@@ -179,12 +252,15 @@ ORDER BY r.started_at DESC
 LIMIT 10;
 ```
 
-## SQLite (пока PG пустой)
+## SQLite (ops на VPS)
 
-Аналог fill rate на VPS:
+Аналог fill rate и последние сделки:
 
 ```sql
 SELECT status, count(*) FROM orders GROUP BY status;
+
+SELECT position_id, gross_pnl, net_pnl, fee_source, exit_reason, close_source
+FROM trade_results ORDER BY closed_at DESC LIMIT 10;
 ```
 
 Через docker — см. [sqlite_mvp.md](sqlite_mvp.md).

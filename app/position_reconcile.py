@@ -173,10 +173,7 @@ def reconcile_exchange_position_if_needed(
 
 
 def _filter_positions(positions: list[OkxPosition], inst_id: str) -> list[OkxPosition]:
-    inst_matches = [p for p in positions if p.inst_id == inst_id]
-    if inst_matches:
-        return inst_matches
-    return list(positions)
+    return [p for p in positions if p.inst_id == inst_id]
 
 
 def _adopt_open_exit_order(

@@ -26,6 +26,10 @@ strategies:
     exit_stale_reprice_ticks: 3
     entry_stale_reprice_ticks: 3
     shutdown_drain_sec: 25.0
+    # Benchmark: запускается на отдельном субсчёте (OKX_ACCOUNT_LABEL), exit-параметры
+    # (TP/SL/timeout/fallback) держать такими же, как у сравниваемой рабочей стратегии.
+    # random_seed не задан — seed генерируется на старте и пишется в executor_runs.extra_json.
+    # random_seed: 42
 
   mean_reversion_v1:
     enabled: false

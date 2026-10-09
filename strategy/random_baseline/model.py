@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from domain.enums.side import Side
 from domain.models.signal import Signal
@@ -18,6 +18,7 @@ class BaselineSignal:
     take_profit_ticks: int
     stop_loss_ticks: int
     timeout_sec: int
+    decision_meta: dict[str, Any] = field(default_factory=dict)
 
     def to_domain_signal(self, instrument: InstrumentId) -> Signal:
         """Преобразование в общий `domain.models.Signal` для execution flow."""

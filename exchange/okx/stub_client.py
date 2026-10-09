@@ -78,8 +78,10 @@ class OkxStubExchangeClient:
         price: Decimal,
         cl_ord_id: str,
         reduce_only: bool = False,
+        inst_id: str | None = None,
+        td_mode: str | None = None,
     ) -> str:
-        _ = reduce_only
+        _ = reduce_only, inst_id, td_mode
         ord_id = f"stub-{cl_ord_id}"
         order = OkxOrder(
             ord_id=ord_id,
@@ -132,6 +134,10 @@ class OkxStubExchangeClient:
     async def get_tick_size(self, *, inst_id: str) -> Decimal:
         _ = inst_id
         return Decimal("0.1")
+
+    async def get_contract_value(self, *, inst_id: str) -> Decimal:
+        _ = inst_id
+        return Decimal("0.01")
 
     async def get_best_bid_ask(self, *, inst_id: str) -> tuple[Decimal, Decimal]:
         _ = inst_id

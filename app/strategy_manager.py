@@ -12,6 +12,18 @@ from persistence.sqlite_store import SqliteMvpStore
 from strategy.random_baseline.config import config_from_params
 
 
+class InstrumentConflictError(RuntimeError):
+    """Две стратегии на одном инструменте в одном аккаунте делят позицию OKX."""
+
+
+def find_instrument_conflict(*, running: dict[str, str], inst_id: str) -> str | None:
+    """Имя уже запущенной стратегии на том же инструменте, иначе None."""
+    for name, running_inst in running.items():
+        if running_inst == inst_id:
+            return name
+    return None
+
+
 @dataclass(slots=True)
 class StrategyRuntime:
     strategy_name: str
@@ -62,12 +74,35 @@ class StrategyManager:
         for cfg in self._settings.get_strategy_runtime_configs():
             if cfg.mode != StrategyMode.ENABLED:
                 continue
-            await self._start_strategy(strategy_name=cfg.strategy_name)
+            try:
+                await self._start_strategy(strategy_name=cfg.strategy_name)
+            except InstrumentConflictError as exc:
+                self._log.error("strategy not started: %s", exc)
+                self._store.set_strategy_runtime_state(
+                    strategy_name=cfg.strategy_name, runtime_state="error"
+                )
+                self._store.save_service_event(
+                    strategy_name=cfg.strategy_name,
+                    event_type="strategy_start_rejected",
+                    message=str(exc),
+                    payload={"inst_id": cfg.inst_id},
+                    level="ERROR",
+                )
 
     async def _start_strategy(self, *, strategy_name: str) -> None:
         if strategy_name in self._runtimes:
             return
         deployment = self._strategies.get_deployment(strategy_name)
+        conflict = find_instrument_conflict(
+            running={name: rt.inst_id for name, rt in self._runtimes.items()},
+            inst_id=deployment.inst_id,
+        )
+        if conflict is not None:
+            raise InstrumentConflictError(
+                f"strategy '{strategy_name}' cannot start on {deployment.inst_id}: "
+                f"'{conflict}' already trades it in this process. One account (subaccount) "
+                "shares positions per instrument, run the other strategy on a separate subaccount."
+            )
         ctx = build_executor_context(self._settings, deployment=deployment)
         control = StrategyLoopControl()
         task = asyncio.create_task(

@@ -4,8 +4,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.position_state import (
+    ActivePosition,
     build_active_position_from_okx,
     check_exit_reason,
+    is_exit_order_price_stale,
     should_use_market_exit,
 )
 from exchange.okx.models import OkxPosition
@@ -110,33 +112,93 @@ def test_should_use_market_exit_after_attempts() -> None:
     assert should_use_market_exit(position=position, now=now, config=config) is True
 
 
-def test_is_exit_order_price_stale_long_sell() -> None:
-    from app.position_state import is_exit_order_price_stale
-
-    strategy = _strategy()
+def _position(pos: str) -> ActivePosition:
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     position = build_active_position_from_okx(
         okx_pos=OkxPosition(
             inst_id="BTC-USDT-SWAP",
-            pos=Decimal("0.01"),
+            pos=Decimal(pos),
             avg_px=Decimal("61642.9"),
             c_time_ms=int(now.timestamp() * 1000),
         ),
         strategy_name="random_baseline_v1",
         tick_size=Decimal("0.1"),
-        strategy=strategy,
+        strategy=_strategy(),
         now=now,
     )
     assert position is not None
+    return position
+
+
+def test_is_exit_order_price_stale_long_sell_when_market_drops() -> None:
+    # Sell-ордер на 61926.0, рынок ушёл вниз: ask 61900.0 — ордер далеко от touch.
     assert is_exit_order_price_stale(
-        position=position,
+        position=_position("0.01"),
         order_side="sell",
-        order_price=Decimal("61809.9"),
+        order_price=Decimal("61926.0"),
+        best_bid=Decimal("61899.9"),
+        best_ask=Decimal("61900.0"),
+        stale_ticks=3,
+        tick_size=Decimal("0.1"),
+    )
+
+
+def test_is_exit_order_price_not_stale_long_sell_at_touch() -> None:
+    assert not is_exit_order_price_stale(
+        position=_position("0.01"),
+        order_side="sell",
+        order_price=Decimal("61926.0"),
         best_bid=Decimal("61925.9"),
         best_ask=Decimal("61926.0"),
         stale_ticks=3,
         tick_size=Decimal("0.1"),
     )
+
+
+def test_is_exit_order_price_stale_short_buy_when_market_rises() -> None:
+    assert is_exit_order_price_stale(
+        position=_position("-0.01"),
+        order_side="buy",
+        order_price=Decimal("61900.0"),
+        best_bid=Decimal("61926.0"),
+        best_ask=Decimal("61926.1"),
+        stale_ticks=3,
+        tick_size=Decimal("0.1"),
+    )
+
+
+def test_is_exit_order_price_stale_ignores_non_exit_side() -> None:
+    assert not is_exit_order_price_stale(
+        position=_position("0.01"),
+        order_side="buy",
+        order_price=Decimal("61800.0"),
+        best_bid=Decimal("61926.0"),
+        best_ask=Decimal("61926.1"),
+        stale_ticks=3,
+        tick_size=Decimal("0.1"),
+    )
+
+
+def test_partial_exit_fills_vwap_and_remaining() -> None:
+    position = _position("0.03")
+    position.add_exit_fill(fill_sz=Decimal("0.01"), fill_px=Decimal("62000"))
+    assert position.remaining_size() == Decimal("0.02")
+    position.add_exit_fill(fill_sz=Decimal("0.02"), fill_px=Decimal("62003"))
+    assert position.remaining_size() == Decimal("0")
+    assert position.exit_vwap() == Decimal("62002")
+
+
+def test_blended_exit_price_uses_remainder_price() -> None:
+    position = _position("0.02")
+    position.add_exit_fill(fill_sz=Decimal("0.01"), fill_px=Decimal("62000"))
+    assert position.blended_exit_price(Decimal("62010")) == Decimal("62005")
+
+
+def test_filter_positions_does_not_adopt_other_instruments() -> None:
+    from app.position_reconcile import _filter_positions
+
+    eth = OkxPosition(inst_id="ETH-USDT-SWAP", pos=Decimal("1"), avg_px=Decimal("3000"))
+    assert _filter_positions([eth], "BTC-USDT-SWAP") == []
 
 
 def test_is_entry_order_price_stale_buy() -> None:

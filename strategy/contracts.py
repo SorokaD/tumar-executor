@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from domain.models.signal import Signal
 from domain.value_objects.instrument_id import InstrumentId
@@ -12,6 +12,8 @@ class StrategySignal(Protocol):
     strategy_name: str
     side: Literal["long", "short"]
     created_at: datetime
+    # Что видела стратегия при решении (seed/draw для random, фичи для моделей).
+    decision_meta: dict[str, Any]
 
     def to_domain_signal(self, instrument: InstrumentId) -> Signal:
         ...

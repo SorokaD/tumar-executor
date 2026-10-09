@@ -51,7 +51,17 @@ class TradeLifecycleTracker:
     exit_trigger_reason: str | None = None
     timeout_triggered: bool = False
     close_source: str | None = None
+    entry_exchange_ord_ids: list[str] = field(default_factory=list)
+    exit_exchange_ord_ids: list[str] = field(default_factory=list)
     _extra: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def track_order(self, leg: Leg, exchange_ord_id: str | None) -> None:
+        """Каждый ордер ноги (включая перевыставленные) — для сбора всех fills/fees."""
+        if not exchange_ord_id:
+            return
+        ids = self.entry_exchange_ord_ids if leg == "entry" else self.exit_exchange_ord_ids
+        if exchange_ord_id not in ids:
+            ids.append(exchange_ord_id)
 
     def begin(self, signal_id: str, *, tick_size: Decimal | None = None) -> None:
         self.signal_id = signal_id
@@ -101,6 +111,7 @@ class TradeLifecycleTracker:
         self.entry_filled_at = ts
         self.entry_exchange_ord_id = exchange_ord_id
         self.entry_cl_ord_id = cl_ord_id
+        self.track_order("entry", exchange_ord_id)
 
     def on_exit_trigger(self, reason: str) -> None:
         self.exit_trigger_reason = reason
@@ -142,6 +153,7 @@ class TradeLifecycleTracker:
         self.exit_filled_at = ts
         self.exit_exchange_ord_id = exchange_ord_id
         self.exit_cl_ord_id = cl_ord_id
+        self.track_order("exit", exchange_ord_id)
         self.exit_order_type = order_type
         self.close_source = close_source
 
@@ -205,4 +217,6 @@ class TradeLifecycleTracker:
             "close_source": self.close_source,
             "entry_exchange_ord_id": self.entry_exchange_ord_id,
             "exit_exchange_ord_id": self.exit_exchange_ord_id,
+            "entry_exchange_ord_ids": list(self.entry_exchange_ord_ids),
+            "exit_exchange_ord_ids": list(self.exit_exchange_ord_ids),
         }

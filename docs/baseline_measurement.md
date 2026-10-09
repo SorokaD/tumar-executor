@@ -29,8 +29,8 @@ Dual-write: `persistence/executor_store.py` → SQLite синхронно, Postg
 
 | Поле | Смысл |
 |------|--------|
-| `gross_pnl` | PnL до комиссий: `(exit - entry) × size` (long/short) |
-| `entry_fee`, `exit_fee`, `fees_total` | комиссии |
+| `gross_pnl` | PnL до комиссий в USDT: `(exit - entry) × size × contract_value` (long/short); `size` в контрактах, `contract_value = ctVal × ctMult` (BTC-USDT-SWAP: 0.01 BTC); `exit` — VWAP всех exit-исполнений |
+| `entry_fee`, `exit_fee`, `fees_total` | комиссии (издержки: OKX fee со знаком минус; ребейт мейкера уменьшает издержки) по fills всех ордеров сделки, включая перевыставленные |
 | `net_pnl` | `gross_pnl - fees_total` — **главная метрика для сравнения** |
 | `fee_source` | `okx_fill` (с биржи) или `estimated_config` (оценка из YAML) |
 | `entry_liquidity`, `exit_liquidity` | `maker` / `taker` |
@@ -51,7 +51,23 @@ fee_rate_maker: "0.0002"
 fee_rate_taker: "0.0005"
 ```
 
-Используются, если OKX fills недоступны или пустые (timeout fetch 2 сек, не блокирует exit).
+Используются, если OKX fills недоступны или есть не по обеим ногам сделки (timeout fetch 3 сек).
+
+> До этой версии `gross_pnl` и оценка комиссий не учитывали `ctVal` (завышены в 100 раз для BTC-USDT-SWAP),
+> а ребейт считался издержкой. Старые `trade_results` для сравнения стратегий не использовать.
+
+## Random baseline на субсчёте
+
+- Каждый субсчёт OKX — отдельный процесс executor со своими API-ключами и `OKX_ACCOUNT_LABEL`
+  (например `sub-random-baseline`, `sub-mean-reversion`). Метка пишется в `executor_runs.extra_json`
+  и в `strategy_signals.market_snapshot`.
+- В одном процессе нельзя запустить две стратегии на одном `inst_id`: позиция OKX у них общая
+  (`strategy_start_rejected` в service_events).
+- Сравнение: рабочая стратегия против random baseline с **теми же** exit-параметрами
+  (TP/SL/timeout/fallback) и тем же `order_size`, на одном интервале времени.
+- Генератор сторон сидирован: `rng_seed` в `executor_runs.extra_json`, `rng_seed` + `draw_index`
+  в `market_snapshot` каждого сигнала. Одна живая реализация random — лишь одна точка распределения;
+  распределение (Monte Carlo по данным коллектора) считается в research.
 
 ## Цепочка signal → trade_result
 

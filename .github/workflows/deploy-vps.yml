@@ -1,7 +1,8 @@
-# Деплой на VPS при push в main, только если менялся код сервиса (не docs).
+# Деплой на VPS при push в main: CI → образ в GHCR → ручное подтверждение → pull на сервере.
 # Секреты: Settings → Secrets and variables → Actions → Repository secrets
 #   VPS_SSH_HOST, VPS_SSH_USER, VPS_SSH_PRIVATE_KEY
 #   VPS_DEPLOY_PATH (например /opt/okx-hft-executor/okx-hft-executor)
+# Окружение: Settings → Environments → production → Required reviewers.
 #
 # Документация: docs/deployment_cicd.md
 
@@ -29,33 +30,82 @@ on:
       - pyproject.toml
       - .dockerignore
       - .github/workflows/deploy-vps.yml
+      - .github/workflows/ci.yml
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: deploy-vps-main
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
           DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+          DEPLOY_SHA: ${{ github.sha }}
+          EXECUTOR_IMAGE: ${{ needs.build.outputs.image }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: DEPLOY_PATH
+          envs: DEPLOY_PATH,DEPLOY_SHA,EXECUTOR_IMAGE,GHCR_USER,GHCR_TOKEN
           script: |
-            set -euxo pipefail
+            set -euo pipefail
 
             if [ -z "${DEPLOY_PATH:-}" ]; then
               echo "ERROR: secret VPS_DEPLOY_PATH is empty"
@@ -69,21 +119,27 @@ jobs:
 
             cd "${DEPLOY_PATH}"
             echo "Deploy path: $(pwd)"
-            git remote -v
+
+            # Только docker-compose.yml берётся из git; код приходит в образе.
             git fetch origin main
-            git reset --hard origin/main
+            git reset --hard "${DEPLOY_SHA}"
             git log -1 --oneline
 
             test -f .env || { echo "ERROR: .env missing on server"; exit 1; }
 
-            # docker без sudo или с sudo (на VPS часто нужен sudo)
+            export EXECUTOR_IMAGE EXECUTOR_IMAGE_TAG="${DEPLOY_SHA}"
+
             if docker ps >/dev/null 2>&1; then
-              DC="docker compose"
+              DOCKER="docker"
             else
-              DC="sudo docker compose"
+              DOCKER="sudo --preserve-env=EXECUTOR_IMAGE,EXECUTOR_IMAGE_TAG docker"
             fi
 
-            $DC pull 2>/dev/null || true
-            $DC up -d --build
-            $DC ps
-            $DC exec -T executor python -m app.main --dry-run
+            # GITHUB_TOKEN живёт только во время job, долгоживущих токенов на сервере нет.
+            echo "${GHCR_TOKEN}" | $DOCKER login ghcr.io -u "${GHCR_USER}" --password-stdin
+            trap '$DOCKER logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+            $DOCKER compose pull
+            $DOCKER compose up -d --no-build --remove-orphans --wait --wait-timeout 180
+            $DOCKER compose ps
+            $DOCKER compose exec -T executor python -m app.main --dry-run

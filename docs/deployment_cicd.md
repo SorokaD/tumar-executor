@@ -1,48 +1,74 @@
-# CI/CD: автодеплой на VPS при push в `main`
+# CI/CD: тесты, образ в GHCR и деплой на VPS
 
-Деплой через **GitHub Actions** → SSH на VPS → `git pull` + `docker compose up -d --build`.
+Цепочка при push в `main`:
 
-Файл workflow: [.github/workflows/deploy-vps.yml](../.github/workflows/deploy-vps.yml)
+```text
+CI (pytest, ruff, mypy, docker smoke) → сборка образа → ghcr.io → ручное подтверждение → SSH на VPS → docker compose pull + up
+```
+
+Workflow:
+
+- [.github/workflows/ci.yml](../.github/workflows/ci.yml) — CI на каждый PR и push в `develop`; для `main` вызывается из деплоя.
+- [.github/workflows/deploy-vps.yml](../.github/workflows/deploy-vps.yml) — сборка образа и деплой.
+
+Образ: `ghcr.io/sorokad/okx-hft-executor`, теги `<полный sha коммита>` и `latest`.
+На сервере код больше не собирается: из git берётся только `docker-compose.yml`, сам код приходит в образе.
 
 ---
 
 ## 1. Когда срабатывает
 
-| Событие | Условие |
-|---------|---------|
-| `push` в ветку **`main`** | изменились файлы в коде сервиса (см. `paths` в workflow) |
-| `workflow_dispatch` | ручной запуск в GitHub → Actions → Deploy VPS → Run workflow |
+| Событие | Что запускается |
+|---------|-----------------|
+| Pull request в любую ветку | CI |
+| `push` в `develop` | CI |
+| `push` в `main` с изменением кода сервиса (см. `paths` в `deploy-vps.yml`) | CI → образ → деплой (после подтверждения) |
+| `workflow_dispatch` | ручной запуск Deploy VPS из GitHub → Actions |
 
-**Не запускается** при правках только:
+Правки только в `docs/**`, `*.md`, `tests/**` деплой не запускают.
 
-- `docs/**`
-- `README.md`, `AGENTS.md`, `*.md` (кроме попадания в `paths`)
-- `tests/**` (тесты не в `paths` — добавьте при необходимости)
+### Что блокирует деплой
 
-### Изменить список папок
-
-В `.github/workflows/deploy-vps.yml` блок `on.push.paths`:
-
-```yaml
-paths:
-  - app/**
-  - docker-compose.yml
-  # добавьте свои пути
-```
-
-Для **монорепозитория** (если executor в подпапке):
-
-```yaml
-paths:
-  - okx-hft-executor/app/**
-  - okx-hft-executor/docker-compose.yml
-```
-
-И в `script` деплоя: `cd "${DEPLOY_PATH}"` должен указывать на эту подпапку.
+- `pytest` — блокирует.
+- Сборка Docker-образа и `--dry-run` внутри него (replay, safe mode, без Postgres) — блокирует.
+- `ruff` и `mypy --strict` — пока **не** блокируют (`continue-on-error`), результат виден в логе job.
+  Когда код будет вычищен, уберите `continue-on-error` в `ci.yml`.
 
 ---
 
-## 2. Однократная настройка на VPS
+## 2. Однократная настройка GitHub
+
+### Секреты
+
+Репозиторий → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
+
+| Secret | Пример значения |
+|--------|-----------------|
+| `VPS_SSH_HOST` | IP или hostname VPS |
+| `VPS_SSH_USER` | `okx-hft-executor` |
+| `VPS_SSH_PRIVATE_KEY` | содержимое `okx-hft-deploy` (приватный ключ, целиком) |
+| `VPS_DEPLOY_PATH` | `/opt/okx-hft-executor/okx-hft-executor` |
+
+Токен для GHCR заводить не нужно: используется `GITHUB_TOKEN` текущего запуска.
+На сервере он нужен только на время `docker compose pull`, после деплоя выполняется `docker logout`.
+
+### Окружение `production` (ручное подтверждение)
+
+**Settings** → **Environments** → **New environment** → `production`:
+
+- **Required reviewers** — добавьте себя. Без этого GitHub создаст окружение автоматически, но без защиты, и деплой пойдёт сразу.
+- **Deployment branches** → *Selected branches* → `main`.
+
+### Защита ветки `main`
+
+**Settings** → **Branches** → **Add rule** для `main`:
+
+- Require a pull request before merging.
+- Require status checks to pass: `test`, `docker` (из workflow CI).
+
+---
+
+## 3. Однократная настройка VPS
 
 Сервер уже с Docker и клоном репозитория (см. [deployment_vps_runbook.md](deployment_vps_runbook.md)).
 
@@ -50,22 +76,15 @@ paths:
 cd /opt/okx-hft-executor/okx-hft-executor
 git remote -v   # origin → ваш GitHub
 test -f .env && chmod 600 .env
+docker compose version   # нужна v2.17+ для `up --wait --wait-timeout`
 ```
 
 `.env` **остаётся только на сервере**, в git не коммитить.
 
-Пользователь `okx-hft-executor` должен иметь право:
+Пользователь деплоя должен уметь запускать docker без sudo (`usermod -aG docker <user>`)
+или через `sudo` без пароля — workflow сам выберет вариант.
 
-```bash
-# без sudo для docker (после usermod -aG docker)
-docker compose up -d --build
-```
-
-Если docker только через `sudo` — в workflow в `script` замените на `sudo docker compose ...`.
-
----
-
-## 3. Deploy-ключ для GitHub Actions
+### Deploy-ключ для GitHub Actions
 
 На **вашем ПК** (отдельный ключ, не личный):
 
@@ -79,118 +98,68 @@ ssh-keygen -t ed25519 -C "github-actions-deploy-okx-hft" -f $env:USERPROFILE\.ss
 type $env:USERPROFILE\.ssh\okx-hft-deploy.pub | ssh okx-hft-executor@<VPS_IP> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
 
-На сервере ограничьте ключ (опционально, в `~/.ssh/authorized_keys`):
+---
 
-```text
-command="",restrict ssh-ed25519 AAAA... github-actions-deploy
-```
+## 4. Что делает деплой на сервере
 
-Для простого старта достаточно обычной строки ключа.
+1. `git fetch` + `git reset --hard <sha>` — только ради `docker-compose.yml` нужной версии.
+2. Проверка `.env`.
+3. `docker login ghcr.io` временным `GITHUB_TOKEN`.
+4. `EXECUTOR_IMAGE_TAG=<sha> docker compose pull`.
+5. `docker compose up -d --no-build --remove-orphans --wait` — ждёт, пока healthcheck станет healthy.
+6. Smoke: `python -m app.main --dry-run` в контейнере executor.
+7. `docker logout ghcr.io`.
+
+Локально `docker compose up --build` по-прежнему собирает образ из исходников.
 
 ---
 
-## 4. Секреты в GitHub
+## 5. Откат
 
-Репозиторий → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
+Вариант 1 — из GitHub: Actions → Deploy VPS → нужный старый успешный запуск → **Re-run all jobs**.
+Будет задеплоен образ с sha того запуска.
 
-| Secret | Пример значения |
-|--------|-----------------|
-| `VPS_SSH_HOST` | IP или hostname VPS |
-| `VPS_SSH_USER` | `okx-hft-executor` |
-| `VPS_SSH_PRIVATE_KEY` | содержимое `okx-hft-deploy` (приватный ключ, целиком) |
-| `VPS_DEPLOY_PATH` | `/opt/okx-hft-executor/okx-hft-executor` |
-
----
-
-## 5. Что делает workflow
-
-1. Checkout (для метаданных; код на сервер тянется через `git fetch`).
-2. SSH на VPS:
-   - `git fetch` + `git reset --hard origin/main`
-   - проверка `.env`
-   - `docker compose up -d --build`
-   - `docker compose ps`
-   - smoke: `python -m app.main --dry-run` в контейнере executor
-
----
-
-## 6. Проверка
-
-1. Пуш в `main` с изменением, например, `app/orchestrator.py`.
-2. GitHub → **Actions** → run **Deploy VPS** → зелёный статус.
-3. На VPS:
+Вариант 2 — вручную на VPS:
 
 ```bash
 cd /opt/okx-hft-executor/okx-hft-executor
-git log -1 --oneline
-sudo docker compose ps
+git fetch origin && git reset --hard <старый_sha>
+EXECUTOR_IMAGE_TAG=<старый_sha> docker compose pull
+EXECUTOR_IMAGE_TAG=<старый_sha> docker compose up -d --no-build
 ```
 
----
-
-## 7. CI без деплоя (опционально)
-
-Добавьте отдельный workflow `ci.yml` на каждый PR:
-
-```yaml
-on: [pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -e ".[dev]" && pytest
-```
-
-Деплой только из `main` после merge.
+Список доступных тегов: GitHub → профиль → **Packages** → `okx-hft-executor`.
 
 ---
 
-## 8. Безопасность
+## 6. Workflow упал
 
-- Отдельный deploy-ключ, не ваш личный.
-- SSH на VPS только по ключу ([SECURITY_BASELINE](SECURITY_BASELINE_VPS_SSH_AND_NETWORK.md)).
-- Секреты OKX только в `.env` на сервере.
-- `concurrency` в workflow — не два деплоя одновременно на один хост.
-
----
-
-## 9. Откат
-
-```bash
-ssh okx-hft-executor@<VPS_IP>
-cd /opt/okx-hft-executor/okx-hft-executor
-git log --oneline -5
-git reset --hard <commit-sha>
-sudo docker compose up -d --build
-```
-
----
-
-## 10. Workflow упал (exit code 1)
-
-GitHub → run → job **deploy** → **Deploy over SSH** — в логе видны команды с сервера.
+GitHub → run → нужный job → лог шага.
 
 | Сообщение | Решение |
 |-----------|---------|
-| `VPS_DEPLOY_PATH is empty` | Секрет `VPS_DEPLOY_PATH` в GitHub Actions |
-| `not a git repo` | На VPS: `git clone` в `DEPLOY_PATH` |
-| `Permission denied (publickey)` | Deploy-ключ в `authorized_keys` + `VPS_SSH_PRIVATE_KEY` |
+| падает job `test` | тесты не проходят — чинить код, деплой не начнётся |
+| падает job `docker` | образ не собирается или `--dry-run` в нём падает |
+| `VPS_DEPLOY_PATH is empty` | секрет `VPS_DEPLOY_PATH` в GitHub Actions |
+| `not a git repo` | на VPS: `git clone` в `DEPLOY_PATH` |
+| `Permission denied (publickey)` | deploy-ключ в `authorized_keys` + `VPS_SSH_PRIVATE_KEY` |
 | `.env missing` | `scp` `.env` на сервер |
-| `docker: permission denied` | Workflow использует `sudo docker compose` автоматически |
-| `dry-run` failed | `sudo docker compose logs executor` на VPS |
+| `unknown flag: --wait-timeout` | обновить Docker Compose на VPS до v2.17+ |
+| `denied` при `docker compose pull` | у workflow должно быть `packages: read`; пакет в GHCR должен быть привязан к репозиторию |
+| `dry-run` failed | `docker compose logs executor` на VPS |
 
 Проверка ключа с ПК:
 
 ```powershell
-ssh -i C:\Users\sorok\.ssh\okx-hft-deploy okx-hft-executor@<VPS_IP> "cd /opt/okx-hft-executor/okx-hft-executor && git fetch origin main && sudo docker compose ps"
+ssh -i C:\Users\sorok\.ssh\okx-hft-deploy okx-hft-executor@<VPS_IP> "cd /opt/okx-hft-executor/okx-hft-executor && docker compose ps"
 ```
 
 ---
 
-## 11. GitLab / другой CI
+## 7. Безопасность
 
-Тот же `script` из workflow можно запустить в GitLab CI `deploy` job с `only: changes` и переменными `VPS_*`.
+- Отдельный deploy-ключ, не ваш личный.
+- SSH на VPS только по ключу ([SECURITY_BASELINE](SECURITY_BASELINE_VPS_SSH_AND_NETWORK.md)).
+- Секреты OKX только в `.env` на сервере.
+- Деплой торгового кода — только после ручного подтверждения в окружении `production`.
+- `concurrency` в workflow — не два деплоя одновременно на один хост.

@@ -11,7 +11,7 @@ Workflow:
 - [.github/workflows/ci.yml](../.github/workflows/ci.yml) — CI на каждый PR и push в `develop`; для `main` вызывается из деплоя.
 - [.github/workflows/deploy-vps.yml](../.github/workflows/deploy-vps.yml) — сборка образа и деплой.
 
-Образ: `ghcr.io/sorokad/okx-hft-executor`, теги `<полный sha коммита>` и `latest`.
+Образ: `ghcr.io/sorokad/tumar-executor`, теги `<полный sha коммита>` и `latest`.
 На сервере код больше не собирается: из git берётся только `docker-compose.yml`, сам код приходит в образе.
 
 ---
@@ -128,7 +128,7 @@ EXECUTOR_IMAGE_TAG=<старый_sha> docker compose pull
 EXECUTOR_IMAGE_TAG=<старый_sha> docker compose up -d --no-build
 ```
 
-Список доступных тегов: GitHub → профиль → **Packages** → `okx-hft-executor`.
+Список доступных тегов: GitHub → профиль → **Packages** → `tumar-executor`.
 
 ---
 

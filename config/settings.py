@@ -71,6 +71,11 @@ class Settings(BaseSettings):
         validation_alias="OKX_API_PASSPHRASE",
     )
     okx_flag_demo: bool = Field(default=True, validation_alias="OKX_FLAG_DEMO")
+    okx_account_label: str | None = Field(
+        default=None,
+        validation_alias="OKX_ACCOUNT_LABEL",
+        description="Метка субсчёта OKX (например sub-random-baseline); пишется в executor_runs.",
+    )
     okx_base_url: str = Field(
         default="https://www.okx.com",
         validation_alias="OKX_BASE_URL",

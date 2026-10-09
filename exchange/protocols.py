@@ -80,6 +80,10 @@ class ExchangeClient(Protocol):
     async def get_tick_size(self, *, inst_id: str) -> Decimal:
         ...
 
+    async def get_contract_value(self, *, inst_id: str) -> Decimal:
+        """ctVal * ctMult: сколько базовой валюты в одном контракте (sz)."""
+        ...
+
     async def get_best_bid_ask(self, *, inst_id: str) -> tuple[Decimal, Decimal]:
         ...
 

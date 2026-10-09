@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal, Protocol
 
-from exchange.okx.models import OkxPosition
+from exchange.okx.models import OkxOrder, OkxPosition
 from strategy.contracts import StrategyPlugin
 
 
@@ -29,6 +29,26 @@ class ActivePosition:
     sl_price: Decimal
     timeout_at: datetime
     exit_maker_attempts: int = 0
+    exit_filled_size: Decimal = Decimal("0")
+    exit_filled_notional: Decimal = Decimal("0")
+
+    def remaining_size(self) -> Decimal:
+        return self.size - self.exit_filled_size
+
+    def add_exit_fill(self, *, fill_sz: Decimal, fill_px: Decimal) -> None:
+        self.exit_filled_size += fill_sz
+        self.exit_filled_notional += fill_sz * fill_px
+
+    def exit_vwap(self) -> Decimal | None:
+        if self.exit_filled_size <= 0:
+            return None
+        return self.exit_filled_notional / self.exit_filled_size
+
+    def blended_exit_price(self, remainder_px: Decimal) -> Decimal:
+        """Цена выхода на весь размер: уже исполненные части + остаток по `remainder_px`."""
+        remaining = max(self.remaining_size(), Decimal("0"))
+        notional = self.exit_filled_notional + remaining * remainder_px
+        return notional / (self.exit_filled_size + remaining)
 
 
 @dataclass(slots=True)
@@ -42,6 +62,13 @@ class ActiveOrder:
     last_reprice_at: datetime
     reduce_only: bool
     size: str
+    order_type: str = "post_only"
+    timeout_cancel_requested: bool = False
+
+
+def order_fill_price(order: OkxOrder) -> Decimal | None:
+    """Средняя цена исполнения ордера (avgPx), иначе лимитная цена."""
+    return order.avg_px or order.px
 
 
 def build_active_position(
@@ -140,12 +167,6 @@ def should_use_market_exit(
     return now >= grace_deadline
 
 
-def calc_gross_pnl(position: ActivePosition, exit_price: Decimal) -> Decimal:
-    if position.side == "long":
-        return (exit_price - position.entry_price) * position.size
-    return (position.entry_price - exit_price) * position.size
-
-
 def maker_price_for_side(
     *,
     side: Literal["buy", "sell"],
@@ -210,12 +231,17 @@ def is_exit_order_price_stale(
     stale_ticks: int,
     tick_size: Decimal,
 ) -> bool:
-    """True, если exit-maker завис далеко от touch и его нужно переставить немедленно."""
+    """
+    True, если exit-maker завис далеко от touch и его нужно переставить немедленно.
+
+    Sell-ордер устаревает, когда рынок ушёл вниз (ask ниже нашей цены),
+    buy-ордер — когда рынок ушёл вверх (bid выше нашей цены).
+    """
     if stale_ticks <= 0:
         return False
+    if not is_probable_exit_order(position=position, order_side=order_side):
+        return False
     gap = tick_size * Decimal(stale_ticks)
-    if position.side == "long" and order_side == "sell":
-        return best_ask - order_price > gap
-    if position.side == "short" and order_side == "buy":
-        return order_price - best_bid > gap
-    return False
+    if order_side == "sell":
+        return order_price - best_ask > gap
+    return best_bid - order_price > gap

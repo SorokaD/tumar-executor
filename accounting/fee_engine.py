@@ -39,7 +39,8 @@ def _sum_fills(fills: list[OkxFill]) -> tuple[Decimal, str | None, str | None, D
     notional = Decimal("0")
     size = Decimal("0")
     for fill in fills:
-        total_fee += abs(fill.fee)
+        # OKX: отрицательный fee — списание, положительный — ребейт.
+        total_fee -= fill.fee
         fee_ccy = fee_ccy or fill.fee_ccy
         label = _liquidity_label(fill.exec_type)
         if label:
@@ -79,6 +80,7 @@ def estimate_fees(
     entry_px: Decimal,
     exit_px: Decimal,
     size: Decimal,
+    contract_value: Decimal,
     entry_order_type: str,
     exit_order_type: str,
     fee_rate_maker: Decimal,
@@ -87,8 +89,9 @@ def estimate_fees(
 ) -> FeeBreakdown:
     entry_rate = fee_rate_taker if entry_order_type == "market" else fee_rate_maker
     exit_rate = fee_rate_taker if exit_order_type == "market" else fee_rate_maker
-    entry_notional = entry_px * size
-    exit_notional = exit_px * size
+    qty = size * contract_value
+    entry_notional = entry_px * qty
+    exit_notional = exit_px * qty
     entry_fee = entry_notional * entry_rate
     exit_fee = exit_notional * exit_rate
     entry_liq = "taker" if entry_order_type == "market" else "maker"

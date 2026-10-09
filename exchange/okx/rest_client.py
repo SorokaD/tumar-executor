@@ -277,11 +277,11 @@ class OkxRestClient:
             ts_ms=int(item.get("ts", "0")),
         )
 
-    async def get_tick_size(self, *, inst_id: str) -> Decimal:
+    async def _get_swap_instrument(self, *, inst_id: str) -> dict[str, Any]:
         data = await self._request(
             "GET",
             "/api/v5/public/instruments",
-            params={"instType": "SWAP"},
+            params={"instType": "SWAP", "instId": inst_id},
             auth=False,
             expect_list=True,
         )
@@ -290,10 +290,26 @@ class OkxRestClient:
         target = next((item for item in data if item.get("instId") == inst_id), None)
         if not target:
             raise RuntimeError(f"Instrument {inst_id} not found in SWAP list.")
+        return target
+
+    async def get_tick_size(self, *, inst_id: str) -> Decimal:
+        target = await self._get_swap_instrument(inst_id=inst_id)
         tick = target.get("tickSz")
         if not tick:
             raise RuntimeError("tickSz not present in instrument metadata.")
         return Decimal(tick)
+
+    async def get_contract_value(self, *, inst_id: str) -> Decimal:
+        """Размер одного контракта в базовой валюте: ctVal * ctMult (BTC-USDT-SWAP: 0.01)."""
+        target = await self._get_swap_instrument(inst_id=inst_id)
+        ct_val = target.get("ctVal")
+        if not ct_val:
+            raise RuntimeError(f"ctVal not present in instrument metadata for {inst_id}.")
+        ct_mult = target.get("ctMult") or "1"
+        value = Decimal(str(ct_val)) * Decimal(str(ct_mult))
+        if value <= 0:
+            raise RuntimeError(f"Invalid contract value for {inst_id}: ctVal={ct_val} ctMult={ct_mult}")
+        return value
 
     async def get_best_bid_ask(self, *, inst_id: str) -> tuple[Decimal, Decimal]:
         data = await self._request(

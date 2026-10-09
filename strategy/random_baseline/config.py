@@ -26,6 +26,8 @@ class RandomBaselineConfig:
     entry_stale_reprice_ticks: int = 3
     # При остановке процесса (docker stop / редеплой): ждать закрытия позиции, сек.
     shutdown_drain_sec: float = 25.0
+    # Seed генератора сторон. None — случайный seed на старте (пишется в executor_runs и сигналы).
+    random_seed: int | None = None
 
 
 def config_from_params(params: dict[str, Any]) -> RandomBaselineConfig:

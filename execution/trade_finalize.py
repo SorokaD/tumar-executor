@@ -15,6 +15,7 @@ from accounting.fee_engine import (
 )
 from accounting.pnl_engine import calc_gross_pnl, calc_net_pnl
 from app.position_state import ActivePosition
+from exchange.okx.models import OkxFill
 from execution.trade_lifecycle import TradeLifecycleTracker
 from persistence.sqlite_store import TradeResult
 
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_FEE_FETCH_TIMEOUT_SEC = 2.0
+_FEE_FETCH_TIMEOUT_SEC = 3.0
 
 
 def normalize_exit_reason(raw: str | None) -> str:
@@ -42,6 +43,22 @@ def normalize_exit_reason(raw: str | None) -> str:
     return raw
 
 
+def _leg_order_ids(ids: list[str], last_id: str | None) -> list[str]:
+    result = list(ids)
+    if last_id and last_id not in result:
+        result.append(last_id)
+    return result
+
+
+async def _fetch_leg_fills(exchange: Any, *, inst_id: str, ord_ids: list[str]) -> list[OkxFill]:
+    if not ord_ids:
+        return []
+    batches = await asyncio.gather(
+        *(exchange.get_order_fills(inst_id=inst_id, ord_id=oid) for oid in ord_ids)
+    )
+    return [fill for batch in batches for fill in batch]
+
+
 async def resolve_fee_breakdown(
     ctx: ExecutorContext,
     *,
@@ -50,57 +67,61 @@ async def resolve_fee_breakdown(
     entry_px: Decimal,
     exit_px: Decimal,
     size: Decimal,
+    contract_value: Decimal,
     fee_rate_maker: Decimal,
     fee_rate_taker: Decimal,
 ) -> FeeBreakdown:
+    """
+    Комиссии по фактическим fills всех ордеров сделки (включая перевыставленные).
+
+    Если fills есть не по обеим ногам (рестарт, внешнее закрытие) — оценка по конфигу,
+    чтобы не занизить комиссию нулём по недостающей ноге.
+    """
     exchange = ctx.exchange
-    if not hasattr(exchange, "get_order_fills"):
+
+    def _estimate() -> FeeBreakdown:
         return estimate_fees(
             entry_px=entry_px,
             exit_px=exit_px,
             size=size,
+            contract_value=contract_value,
             entry_order_type=lifecycle.entry_order_type,
             exit_order_type=lifecycle.exit_order_type,
             fee_rate_maker=fee_rate_maker,
             fee_rate_taker=fee_rate_taker,
         )
 
+    if not hasattr(exchange, "get_order_fills"):
+        return _estimate()
+
+    entry_ids = _leg_order_ids(lifecycle.entry_exchange_ord_ids, lifecycle.entry_exchange_ord_id)
+    exit_ids = _leg_order_ids(lifecycle.exit_exchange_ord_ids, lifecycle.exit_exchange_ord_id)
+
     async def _fetch() -> FeeBreakdown:
-        entry_fills = await exchange.get_order_fills(  # type: ignore[union-attr]
-            inst_id=inst_id,
-            ord_id=lifecycle.entry_exchange_ord_id,
-            cl_ord_id=lifecycle.entry_cl_ord_id,
+        entry_fills, exit_fills = await asyncio.gather(
+            _fetch_leg_fills(exchange, inst_id=inst_id, ord_ids=entry_ids),
+            _fetch_leg_fills(exchange, inst_id=inst_id, ord_ids=exit_ids),
         )
-        exit_fills = await exchange.get_order_fills(  # type: ignore[union-attr]
-            inst_id=inst_id,
-            ord_id=lifecycle.exit_exchange_ord_id,
-            cl_ord_id=lifecycle.exit_cl_ord_id,
-        )
-        if entry_fills or exit_fills:
+        if entry_fills and exit_fills:
             return fees_from_okx_fills(entry_fills=entry_fills, exit_fills=exit_fills)
-        return estimate_fees(
-            entry_px=entry_px,
-            exit_px=exit_px,
-            size=size,
-            entry_order_type=lifecycle.entry_order_type,
-            exit_order_type=lifecycle.exit_order_type,
-            fee_rate_maker=fee_rate_maker,
-            fee_rate_taker=fee_rate_taker,
+        log.info(
+            "fills incomplete (entry=%s exit=%s), using estimated_config",
+            len(entry_fills),
+            len(exit_fills),
         )
+        return _estimate()
 
     try:
         return await asyncio.wait_for(_fetch(), timeout=_FEE_FETCH_TIMEOUT_SEC)
     except Exception as exc:  # noqa: BLE001
-        log.warning("fee fetch failed, using estimated_config: %s", exc)
-        return estimate_fees(
-            entry_px=entry_px,
-            exit_px=exit_px,
-            size=size,
-            entry_order_type=lifecycle.entry_order_type,
-            exit_order_type=lifecycle.exit_order_type,
-            fee_rate_maker=fee_rate_maker,
-            fee_rate_taker=fee_rate_taker,
+        log.warning(
+            "fee fetch failed, using estimated_config: inst_id=%s entry_ord_ids=%s exit_ord_ids=%s: %s",
+            inst_id,
+            entry_ids,
+            exit_ids,
+            exc,
         )
+        return _estimate()
 
 
 def build_trade_result(
@@ -113,12 +134,14 @@ def build_trade_result(
     fees: FeeBreakdown,
     exit_reason: str,
     close_source: str,
+    contract_value: Decimal,
 ) -> TradeResult:
     gross = calc_gross_pnl(
         side=position.side,
         entry_price=position.entry_price,
         exit_price=exit_price,
         size=position.size,
+        contract_value=contract_value,
     )
     net = calc_net_pnl(gross_pnl=gross, total_fee=fees.total_fee)
     holding = (closed_at - position.entry_ts).total_seconds()
@@ -167,6 +190,7 @@ async def finalize_closed_trade(
     fee_rate_taker: Decimal,
     exit_reason_raw: str | None,
     close_source: str,
+    contract_value: Decimal,
 ) -> TradeResult:
     exit_reason = normalize_exit_reason(lifecycle.exit_trigger_reason or exit_reason_raw)
     fees = await resolve_fee_breakdown(
@@ -176,6 +200,7 @@ async def finalize_closed_trade(
         entry_px=position.entry_price,
         exit_px=exit_price,
         size=position.size,
+        contract_value=contract_value,
         fee_rate_maker=fee_rate_maker,
         fee_rate_taker=fee_rate_taker,
     )
@@ -188,6 +213,7 @@ async def finalize_closed_trade(
         fees=fees,
         exit_reason=exit_reason,
         close_source=close_source,
+        contract_value=contract_value,
     )
     store.save_position_close(
         position_id=position.position_id,
@@ -212,6 +238,7 @@ async def finalize_reconciled_close(
     inst_id: str,
     fee_rate_maker: Decimal,
     fee_rate_taker: Decimal,
+    contract_value: Decimal,
 ) -> None:
     """Закрытие без fill на бирже (sync_lost / reconcile)."""
     lc = lifecycle or TradeLifecycleTracker()
@@ -231,5 +258,6 @@ async def finalize_reconciled_close(
         fee_rate_taker=fee_rate_taker,
         exit_reason_raw="reconcile",
         close_source="okx_reconcile",
+        contract_value=contract_value,
     )
     _ = trade

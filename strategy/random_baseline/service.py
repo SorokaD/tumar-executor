@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import random
+import secrets
 from datetime import datetime, timedelta
 
 from services.id_generation import new_client_order_id
@@ -10,7 +11,12 @@ from strategy.random_baseline.state import RandomBaselineState
 
 
 class RandomBaselineStrategy:
-    """Минимальная baseline-стратегия: раз в шаг выбирает long/short случайно."""
+    """
+    Baseline для сравнения: раз в шаг выбирает long/short случайно (50/50).
+
+    Генератор изолирован и сидирован: последовательность сторон воспроизводима
+    по `rng_seed`, который пишется в executor_runs и в каждый сигнал.
+    """
 
     def __init__(
         self,
@@ -21,6 +27,13 @@ class RandomBaselineStrategy:
         self.config = config or RandomBaselineConfig()
         self.state = state or RandomBaselineState()
         self.strategy_name = strategy_name
+        self.rng_seed: int = (
+            self.config.random_seed
+            if self.config.random_seed is not None
+            else secrets.randbits(32)
+        )
+        self._rng = random.Random(self.rng_seed)
+        self._draw_index = 0
 
     def should_decide(
         self,
@@ -47,7 +60,8 @@ class RandomBaselineStrategy:
 
     def make_decision(self, now: datetime) -> BaselineSignal:
         """Случайно выбирает сторону и возвращает baseline-сигнал."""
-        side = random.choice(["long", "short"])
+        side = self._rng.choice(["long", "short"])
+        self._draw_index += 1
         signal = BaselineSignal(
             signal_id=new_client_order_id(prefix="rb"),
             strategy_name=self.strategy_name,
@@ -56,6 +70,10 @@ class RandomBaselineStrategy:
             take_profit_ticks=self.config.take_profit_ticks,
             stop_loss_ticks=self.config.stop_loss_ticks,
             timeout_sec=self.config.timeout_sec,
+            decision_meta={
+                "rng_seed": self.rng_seed,
+                "draw_index": self._draw_index,
+            },
         )
         self.state.last_decision_ts = now
         return signal

@@ -139,7 +139,17 @@ jobs:
             echo "${GHCR_TOKEN}" | $DOCKER login ghcr.io -u "${GHCR_USER}" --password-stdin
             trap '$DOCKER logout ghcr.io >/dev/null 2>&1 || true' EXIT
 
-            $DOCKER compose pull
+            for attempt in 1 2 3; do
+              if $DOCKER compose pull; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "ERROR: docker compose pull failed after 3 attempts"
+                exit 1
+              fi
+              echo "pull failed (attempt ${attempt}), retrying in 15s"
+              sleep 15
+            done
             $DOCKER compose up -d --no-build --remove-orphans --wait --wait-timeout 180
             $DOCKER compose ps
             $DOCKER compose exec -T executor python -m app.main --dry-run

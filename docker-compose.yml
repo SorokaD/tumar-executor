@@ -18,7 +18,7 @@ services:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD-SHELL", "python -m app.main --dry-run || exit 1"]
+      test: ["CMD-SHELL", "python -m app.main --dry-run && python -m app.healthcheck || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

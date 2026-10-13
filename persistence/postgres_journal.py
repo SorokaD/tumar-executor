@@ -7,16 +7,39 @@ import logging
 import os
 import queue
 import socket
+import tempfile
 import threading
+import time
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import psycopg
+from psycopg import errors as pg_errors
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
 log = logging.getLogger(__name__)
+
+# Без keepalive мёртвое TCP-соединение обнаруживается через десятки минут (ядро ретраит молча).
+# Startup-параметры (options=-c statement_timeout) не передаём: PgBouncer их отвергает.
+_CONNECT_KWARGS: dict[str, Any] = {
+    "connect_timeout": 10,
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 30_000,
+}
+_COMMIT_EVERY = 25
+_COMMIT_NOW_OPS = frozenset({"start_run", "finish_run"})
+_MAX_BATCH_FAILURES = 5
+# Обрыв посреди пачки обычно сетевой — даём больше попыток, чем ошибке данных.
+_MAX_BATCH_RECONNECTS = 20
+_HEALTH_WRITE_INTERVAL_SEC = 5.0
 
 
 def _utc_now() -> datetime:
@@ -52,7 +75,8 @@ class PostgresJournal:
     Неблокирующий журнал в PostgreSQL.
 
     Торговый цикл только кладёт события в очередь (put_nowait).
-    Отдельный daemon-поток выполняет INSERT/UPDATE и commit.
+    Отдельный daemon-поток выполняет INSERT/UPDATE и commit. При обрыве соединения поток
+    переподключается и повторяет незакоммиченную пачку; завершается только по stop().
     """
 
     def __init__(
@@ -61,6 +85,8 @@ class PostgresJournal:
         *,
         schema: str = "okx_exec",
         queue_size: int = 10_000,
+        connect: Callable[..., psycopg.Connection[Any]] | None = None,
+        reconnect_backoff: tuple[float, float] = (1.0, 30.0),
     ) -> None:
         self._dsn = dsn
         self._schema = schema
@@ -70,6 +96,17 @@ class PostgresJournal:
         self._run_id_ready = threading.Event()
         self._dropped = 0
         self._stop_sentinel = object()
+        self._stop_requested = threading.Event()
+        self._connect = connect or psycopg.connect
+        self._backoff_initial, self._backoff_max = reconnect_backoff
+        self._connected = False
+        self._disconnected_since: float | None = None
+        self._last_loop_at = time.monotonic()
+        self._last_commit_at: float | None = None
+        self._last_drop_at: float | None = None
+        self._last_error: str | None = None
+        self._reconnects = 0
+        self._batch_failures = 0
 
     @property
     def run_id(self) -> int | None:
@@ -79,12 +116,36 @@ class PostgresJournal:
     def dropped_events(self) -> int:
         return self._dropped
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Состояние журнала для healthcheck (читается из другого потока, значения атомарны)."""
+        now = time.monotonic()
+
+        def age(ts: float | None) -> float | None:
+            return None if ts is None else round(now - ts, 1)
+
+        thread = self._thread
+        return {
+            "schema": self._schema,
+            "run_id": self._run_id,
+            "worker_alive": thread is not None and thread.is_alive(),
+            "connected": self._connected,
+            "disconnected_for_sec": age(self._disconnected_since),
+            "loop_age_sec": age(self._last_loop_at),
+            "last_commit_age_sec": age(self._last_commit_at),
+            "last_drop_age_sec": age(self._last_drop_at),
+            "dropped_events": self._dropped,
+            "queue_size": self._queue.qsize(),
+            "reconnects": self._reconnects,
+            "last_error": self._last_error,
+        }
+
     def start_run(self, params: RunStartParams) -> int:
         """Запускает worker-поток и синхронно создаёт executor_runs (один раз при старте loop)."""
         if self._thread is not None:
             raise RuntimeError("PostgresJournal already started")
         self._thread = threading.Thread(target=self._worker, name="pg-journal", daemon=True)
         self._thread.start()
+        _register_for_health(self)
         self._enqueue(("start_run", params))
         if not self._run_id_ready.wait(timeout=30.0):
             raise TimeoutError("postgres executor_runs insert timed out after 30s")
@@ -96,11 +157,23 @@ class PostgresJournal:
         self._enqueue(("finish_run", params))
 
     def stop(self) -> None:
-        """Останавливает worker после сброса очереди."""
-        self._enqueue(self._stop_sentinel)
+        """Останавливает worker после сброса очереди; если БД недоступна — не дольше ~20 с."""
+        try:
+            self._queue.put(self._stop_sentinel, timeout=5.0)
+        except queue.Full:
+            log.error("postgres journal stop: queue full, abandoning %s events", self._queue.qsize())
+            self._stop_requested.set()
         if self._thread is not None:
             self._thread.join(timeout=15.0)
+            if self._thread.is_alive():
+                log.error(
+                    "postgres journal stop: worker did not drain in 15s, abandoning %s events",
+                    self._queue.qsize(),
+                )
+                self._stop_requested.set()
+                self._thread.join(timeout=5.0)
             self._thread = None
+        _unregister_for_health(self)
 
     def enqueue_signal(
         self,
@@ -485,6 +558,7 @@ class PostgresJournal:
             self._queue.put_nowait(item)
         except queue.Full:
             self._dropped += 1
+            self._last_drop_at = time.monotonic()
             if self._dropped == 1 or self._dropped % 100 == 0:
                 log.warning("postgres journal queue full, dropped_events=%s", self._dropped)
 
@@ -497,42 +571,193 @@ class PostgresJournal:
 
     def _worker(self) -> None:
         conn: psycopg.Connection[Any] | None = None
-        pending_commits = 0
+        # Отправлено в текущую транзакцию, но не закоммичено: при обрыве повторяется целиком.
+        batch: list[tuple[str, Any]] = []
+        stopping = False
         try:
-            conn = psycopg.connect(self._dsn, autocommit=False)
-            while True:
+            while not self._stop_requested.is_set():
+                self._last_loop_at = time.monotonic()
+                if conn is None:
+                    conn = self._connect_with_retry()
+                    if conn is None:
+                        break
+                    if batch and not self._replay(conn, batch):
+                        conn = self._drop_connection(conn, "replay", batch)
+                        continue
+
+                item: tuple[str, Any] | None = None
+                if not stopping:
+                    try:
+                        got = self._queue.get(timeout=0.1)
+                    except queue.Empty:
+                        got = None
+                    if got is self._stop_sentinel:
+                        stopping = True
+                    else:
+                        item = got
+
+                in_batch = False
                 try:
-                    item = self._queue.get(timeout=0.1)
-                except queue.Empty:
-                    if pending_commits > 0 and conn is not None:
-                        conn.commit()
-                        pending_commits = 0
+                    if item is not None:
+                        self._dispatch(conn, item)
+                        batch.append(item)
+                        in_batch = True
+                    if batch and (
+                        item is None or len(batch) >= _COMMIT_EVERY or item[0] in _COMMIT_NOW_OPS
+                    ):
+                        self._commit(conn, batch)
+                except Exception as exc:  # noqa: BLE001 — поток журнала не должен умирать
+                    op = item[0] if item is not None else "commit"
+                    self._note_error(exc)
+                    if _is_connection_error(conn, exc):
+                        if item is not None and not in_batch:
+                            batch.append(item)
+                        conn = self._drop_connection(conn, op, batch)
+                        continue
+                    log.exception("postgres journal write failed: op=%s", op)
+                    conn = self._recover_after_write_error(conn, batch)
                     continue
-                if item is self._stop_sentinel:
+
+                if stopping and not batch:
                     break
-                try:
-                    self._dispatch(conn, item)
-                    pending_commits += 1
-                    if pending_commits >= 25:
-                        conn.commit()
-                        pending_commits = 0
-                except Exception:
-                    log.exception("postgres journal write failed: op=%s", item[0] if item else None)
-                    if conn is not None:
-                        conn.rollback()
-            if conn is not None and pending_commits > 0:
-                conn.commit()
-        except Exception:
-            log.exception("postgres journal worker failed")
+        except Exception:  # noqa: BLE001
+            log.exception("postgres journal worker crashed")
         finally:
-            if conn is not None:
-                conn.close()
+            if batch or not self._queue.empty():
+                log.error(
+                    "postgres journal stopped with unsaved events: batch=%s queued=%s",
+                    len(batch),
+                    self._queue.qsize(),
+                )
+            self._close_quietly(conn)
+            self._connected = False
+
+    def _connect_with_retry(self) -> psycopg.Connection[Any] | None:
+        delay = self._backoff_initial
+        while not self._stop_requested.is_set():
+            self._last_loop_at = time.monotonic()
+            try:
+                conn = self._connect(self._dsn, autocommit=False, **_CONNECT_KWARGS)
+            except Exception as exc:  # noqa: BLE001
+                self._note_error(exc)
+                if self._disconnected_since is None:
+                    self._disconnected_since = time.monotonic()
+                log.warning("postgres journal connect failed, retry in %.1fs: %s", delay, exc)
+                self._stop_requested.wait(delay)
+                delay = min(delay * 2, self._backoff_max)
+                continue
+            if self._disconnected_since is not None:
+                log.info(
+                    "postgres journal connected after %.1fs offline (reconnects=%s)",
+                    time.monotonic() - self._disconnected_since,
+                    self._reconnects,
+                )
+            self._connected = True
+            self._disconnected_since = None
+            return conn
+        return None
+
+    def _drop_connection(
+        self,
+        conn: psycopg.Connection[Any] | None,
+        op: str,
+        batch: list[tuple[str, Any]] | None = None,
+    ) -> None:
+        log.warning(
+            "postgres journal connection lost: op=%s error=%s; reconnecting",
+            op,
+            self._last_error,
+        )
+        self._close_quietly(conn)
+        self._connected = False
+        if self._disconnected_since is None:
+            self._disconnected_since = time.monotonic()
+        self._reconnects += 1
+        if batch:
+            self._batch_failures += 1
+            if self._batch_failures >= _MAX_BATCH_RECONNECTS:
+                log.error(
+                    "postgres journal: batch lost connection %s times, dropping %s events: ops=%s",
+                    self._batch_failures,
+                    len(batch),
+                    [o for o, _ in batch],
+                )
+                batch.clear()
+                self._batch_failures = 0
+        self._stop_requested.wait(self._backoff_initial)
+        return None
+
+    def _commit(self, conn: psycopg.Connection[Any], batch: list[tuple[str, Any]]) -> None:
+        conn.commit()
+        batch.clear()
+        self._batch_failures = 0
+        self._last_commit_at = time.monotonic()
+        if self._run_id is not None:
+            self._run_id_ready.set()
+
+    def _replay(self, conn: psycopg.Connection[Any], batch: list[tuple[str, Any]]) -> bool:
+        """Повторяет пачку в новой транзакции. False — соединение снова потеряно."""
+        while True:
+            current: tuple[str, Any] | None = None
+            try:
+                for current in batch:
+                    self._dispatch(conn, current)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                self._note_error(exc)
+                if _is_connection_error(conn, exc):
+                    return False
+                log.exception(
+                    "postgres journal replay: event rejected, dropped: op=%s",
+                    current[0] if current else None,
+                )
+                if current is not None:
+                    batch.remove(current)
+                try:
+                    conn.rollback()
+                except Exception as rb_exc:  # noqa: BLE001
+                    self._note_error(rb_exc)
+                    return False
+
+    def _recover_after_write_error(
+        self, conn: psycopg.Connection[Any], batch: list[tuple[str, Any]]
+    ) -> psycopg.Connection[Any] | None:
+        """Ошибка данных: событие уже выброшено (не попало в batch), остальную пачку повторяем."""
+        self._batch_failures += 1
+        if self._batch_failures >= _MAX_BATCH_FAILURES and batch:
+            log.error(
+                "postgres journal: batch failed %s times, dropping %s events: ops=%s",
+                self._batch_failures,
+                len(batch),
+                [op for op, _ in batch],
+            )
+            batch.clear()
+            self._batch_failures = 0
+        try:
+            conn.rollback()
+        except Exception as exc:  # noqa: BLE001
+            self._note_error(exc)
+            return self._drop_connection(conn, "rollback", batch)
+        if batch and not self._replay(conn, batch):
+            return self._drop_connection(conn, "replay", batch)
+        return conn
+
+    def _note_error(self, exc: BaseException) -> None:
+        self._last_error = f"{type(exc).__name__}: {exc}".strip()[:300]
+
+    @staticmethod
+    def _close_quietly(conn: psycopg.Connection[Any] | None) -> None:
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            log.debug("postgres journal: close failed", exc_info=True)
 
     def _dispatch(self, conn: psycopg.Connection[Any], item: tuple[str, Any]) -> None:
         op, payload = item
         if op == "start_run":
             self._run_id = self._insert_run(conn, payload)
-            self._run_id_ready.set()
             return
         if op == "finish_run":
             self._finish_run(conn, payload)
@@ -951,3 +1176,70 @@ def _level_to_severity(level: str) -> str:
     if normalized == "WARNING":
         return "warning"
     return "info"
+
+
+def _is_connection_error(conn: psycopg.Connection[Any] | None, exc: BaseException) -> bool:
+    if conn is None or conn.closed or conn.broken:
+        return True
+    # QueryCanceled — тоже OperationalError, но соединение живо: это ошибка конкретного запроса.
+    return isinstance(exc, psycopg.OperationalError) and not isinstance(
+        exc, pg_errors.QueryCanceled
+    )
+
+
+# --- health file для docker healthcheck (app/healthcheck.py) ---------------------------------
+
+_health_lock = threading.Lock()
+_health_journals: weakref.WeakSet[PostgresJournal] = weakref.WeakSet()
+_health_writer: threading.Thread | None = None
+
+
+def journal_health_file() -> Path:
+    override = os.environ.get("OKX_HFT_JOURNAL_HEALTH_FILE")
+    if override:
+        return Path(override)
+    return Path(tempfile.gettempdir()) / "okx_exec_journal_health.json"
+
+
+def clear_journal_health_file() -> None:
+    """Вызывается при старте торгового процесса: файл от прошлого запуска не должен считаться живым."""
+    journal_health_file().unlink(missing_ok=True)
+
+
+def write_journal_health_file() -> None:
+    with _health_lock:
+        journals = list(_health_journals)
+    report = {
+        "written_at": time.time(),
+        "pid": os.getpid(),
+        "journals": [j.health_snapshot() for j in journals],
+    }
+    path = journal_health_file()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(report), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _health_writer_loop() -> None:
+    while True:
+        try:
+            write_journal_health_file()
+        except Exception:  # noqa: BLE001
+            log.exception("postgres journal: health file write failed")
+        time.sleep(_HEALTH_WRITE_INTERVAL_SEC)
+
+
+def _register_for_health(journal: PostgresJournal) -> None:
+    global _health_writer
+    with _health_lock:
+        _health_journals.add(journal)
+        if _health_writer is None:
+            _health_writer = threading.Thread(
+                target=_health_writer_loop, name="pg-journal-health", daemon=True
+            )
+            _health_writer.start()
+
+
+def _unregister_for_health(journal: PostgresJournal) -> None:
+    with _health_lock:
+        _health_journals.discard(journal)

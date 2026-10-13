@@ -23,6 +23,7 @@ from config.strategy_config import (
     StrategyDeploymentConfig,
     get_strategies_config,
 )
+from persistence.postgres_journal import clear_journal_health_file
 from persistence.sqlite_store import SqliteMvpStore
 
 
@@ -134,6 +135,8 @@ def main() -> None:
             list_strategies=args.list_strategies,
         )
         return
+
+    clear_journal_health_file()
 
     if args.single_strategy:
         default_dep = get_strategies_config(settings).get_default_deployment()

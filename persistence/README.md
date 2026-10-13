@@ -53,6 +53,16 @@
 - DDL: `migrations/postgres/` (`005`, `006` — measurement baseline).
 - См. [docs/baseline_measurement.md](../docs/baseline_measurement.md).
 
+### Надёжность `PostgresJournal`
+
+- Соединение с TCP keepalive, `connect_timeout`, `tcp_user_timeout`: мёртвое соединение рвётся
+  примерно за минуту, а не за десятки минут.
+- При обрыве поток переподключается (backoff 1→30 с) и повторяет незакоммиченную пачку; событие,
+  которое БД отвергла (ошибка данных), выбрасывается с `log.exception`, остальные сохраняются.
+- Состояние журналов раз в 5 с пишется в `/tmp/okx_exec_journal_health.json`
+  (`OKX_HFT_JOURNAL_HEALTH_FILE`); `python -m app.healthcheck` делает контейнер `unhealthy`, если поток
+  умер, завис > 90 с, БД недоступна > 120 с или за последние 5 мин были выброшены события.
+
 ## Примеры будущего расширения
 
 - event sourcing + проекции;

@@ -11,7 +11,7 @@ Workflow:
 - [.github/workflows/ci.yml](../.github/workflows/ci.yml) — CI на каждый PR и push в `develop`; для `main` вызывается из деплоя.
 - [.github/workflows/deploy-vps.yml](../.github/workflows/deploy-vps.yml) — сборка образа и деплой.
 
-Образ: `ghcr.io/sorokad/okx-hft-executor` (`ghcr.io/${GITHUB_REPOSITORY}`), теги `<полный sha коммита>` и `latest`.
+Образ: `ghcr.io/sorokad/tumar-executor` (`ghcr.io/${GITHUB_REPOSITORY}` после rename репо), теги `<полный sha коммита>` и `latest`.
 Деплой выставляет `EXECUTOR_IMAGE` явно; то же имя — fallback в `docker-compose.yml`.
 На сервере код больше не собирается: из git берётся только `docker-compose.yml`, сам код приходит в образе.
 
